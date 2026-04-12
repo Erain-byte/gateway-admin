@@ -3,10 +3,12 @@ API 路由
 """
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from app.services.auth_service import auth_service
 from app.services.token_service import token_service
 from app.services.config_service import config_service
+from app.database_pool import get_db_async
 
 router = APIRouter()
 
@@ -69,10 +71,12 @@ class HmacKeyRequest(BaseModel):
 # ============ 认证相关 ============
 
 @router.post("/auth/login", response_model=LoginResponse)
-async def login(request: LoginRequest, req: Request):
+async def login(request: LoginRequest, req: Request, session: AsyncSession = Depends(get_db_async)):
     """登录"""
     ip = get_client_ip(req)
-    success, result, user_info = auth_service.login(request.username, request.password, ip=ip)
+    success, result, user_info = await auth_service.login(
+        request.username, request.password, session, ip=ip
+    )
     if not success:
         raise HTTPException(status_code=401, detail=result)
     return LoginResponse(

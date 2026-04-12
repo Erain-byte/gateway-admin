@@ -1,12 +1,12 @@
 """
 数据库连接池管理
 """
+from typing import AsyncGenerator, Generator
 from sqlalchemy import create_engine, pool
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import sessionmaker
 from sqlmodel import SQLModel, Session
-from contextlib import contextmanager
-from typing import Generator
+from contextlib import contextmanager, asynccontextmanager
 from config import settings
 
 
@@ -80,17 +80,10 @@ class DatabaseManager:
         SQLModel.metadata.drop_all(self.sync_engine)
     
     @contextmanager
-    def get_session(self) -> Generator[Session, None, None]:
+    def get_session(self):
         """获取同步数据库会话"""
-        session = self.SessionLocal()
-        try:
+        with self.SessionLocal() as session:
             yield session
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
-        finally:
-            session.close()
     
     def close(self):
         """关闭所有连接"""
@@ -104,7 +97,15 @@ class DatabaseManager:
 db_manager = DatabaseManager()
 
 
+@contextmanager
 def get_db() -> Generator[Session, None, None]:
-    """FastAPI 依赖注入用的数据库会话"""
-    with db_manager.get_session() as session:
+    """FastAPI 依赖注入用的同步数据库会话"""
+    with db_manager.SessionLocal() as session:
+        yield session
+
+
+@asynccontextmanager
+async def get_db_async() -> AsyncGenerator[AsyncSession, None]:
+    """FastAPI 依赖注入用的异步数据库会话"""
+    async with db_manager.AsyncSessionLocal() as session:
         yield session

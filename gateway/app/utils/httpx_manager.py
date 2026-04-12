@@ -233,13 +233,15 @@ class HTTPClientManager:
             try:
                 # 解析缓存的响应
                 cached_data = json.loads(cached_response)
-                # 创建模拟响应
-                return httpx.Response(
+                # ✅ 正确构造 httpx.Response
+                response = httpx.Response(
                     status_code=cached_data["status_code"],
-                    content=cached_data["content"].encode(),
+                    content=cached_data["content"].encode() if isinstance(cached_data["content"], str) else cached_data["content"],
                     headers=cached_data["headers"],
-                    request=httpx.Request("GET", url)  # 添加 request 属性
+                    request=httpx.Request("GET", url),
+                    extensions={"http_version": b"HTTP/1.1"}
                 )
+                return response
             except Exception as e:
                 logger.warning(f"解析缓存响应失败：{e}")
         

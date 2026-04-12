@@ -56,7 +56,7 @@ class RateLimiter(BaseHTTPMiddleware):
 
     async def _check_rate_limit(self, key: str) -> tuple[bool, int, int]:
         """
-        检查是否超过限流
+        检查是否超过限流（使用 Redis ZSET 实现真正的滑动窗口）
 
         Args:
             key: 限流 key
@@ -68,23 +68,30 @@ class RateLimiter(BaseHTTPMiddleware):
             reset_time: 重置时间戳
         """
         now = time.time()
-        window_start = int(now // self.window_seconds * self.window_seconds)
-        reset_time = window_start + self.window_seconds
+        window_start = now - self.window_seconds
+        reset_time = int(now + self.window_seconds)
 
-        redis_key = f"{self.rate_key}:{key}:{window_start}"
+        redis_key = f"{self.rate_key}:{key}"
 
         try:
-            current = await self.redis.get(redis_key)
-            if current is None:
-                count = 1
-            else:
-                count = int(current) + 1
-
-            remaining = max(0, self.max_requests - count)
-            is_allowed = count <= self.max_requests
+            # ✅ 使用 ZSET 实现滑动窗口
+            
+            # 1. 删除窗口外的旧数据
+            await self.redis.zremrangebyscore(redis_key, 0, window_start)
+            
+            # 2. 获取当前窗口内的请求数
+            current_count = await self.redis.zcard(redis_key)
+            
+            remaining = max(0, self.max_requests - current_count)
+            is_allowed = current_count < self.max_requests
 
             if is_allowed:
-                await self.redis.set(redis_key, str(count), ex=self.window_seconds + 1)
+                # ✅ 添加当前请求到 ZSET，score 为时间戳，member 为唯一标识
+                member = f"{now}:{hash(key)}"
+                await self.redis.zadd(redis_key, {member: now})
+                # 设置过期时间（比窗口稍长，确保清理）
+                await self.redis.expire(redis_key, int(self.window_seconds * 2))
+                remaining -= 1
 
             return is_allowed, remaining, reset_time
 

@@ -11,6 +11,7 @@ import secrets
 from typing import Optional, Tuple
 from loguru import logger
 from config import settings
+from app.utils.redis_manager import get_redis_manager
 
 
 class HMACValidator:
@@ -30,8 +31,9 @@ class HMACValidator:
         """
         self.secret_key = secret_key or settings.HMAC_SECRET_KEY
         self.timestamp_tolerance = timestamp_tolerance
-        # 用于存储已使用的 nonce（生产环境建议用 Redis）
-        self._used_nonces: set = set()
+        # ✅ 使用 Redis 存储已使用的 nonce（生产环境）
+        self.redis = get_redis_manager()
+        self._nonce_ttl = timestamp_tolerance * 2  # Nonce 过期时间为时间戳容差的2倍
 
     def generate_signature(
         self,
@@ -63,7 +65,7 @@ class HMACValidator:
         
         return signature, timestamp, nonce
 
-    def verify_signature(
+    async def verify_signature(
         self,
         signature: str,
         body: str,
@@ -89,9 +91,17 @@ class HMACValidator:
         if abs(current_time - timestamp) > self.timestamp_tolerance:
             return False, f"Timestamp expired (tolerance: {self.timestamp_tolerance}s)"
 
-        # 2. 检查 nonce（防重放）
-        if nonce in self._used_nonces:
-            return False, "Nonce already used (replay attack)"
+        # ✅ 2. 检查 nonce（防重放）- 使用 Redis
+        nonce_key = f"hmac:nonce:{nonce}"
+        try:
+            exists = await self.redis.exists(nonce_key)
+            if exists:
+                return False, "Nonce already used (replay attack)"
+        except Exception as e:
+            logger.error(f"Redis 检查 Nonce 失败: {e}")
+            # Redis 故障时降级到内存检查（安全性降低）
+            if hasattr(self, '_used_nonces_memory') and nonce in self._used_nonces_memory:
+                return False, "Nonce already used (replay attack)"
         
         # 3. 验证签名
         key = client_key or self.secret_key
@@ -105,23 +115,39 @@ class HMACValidator:
         if not hmac.compare_digest(signature, expected_signature):
             return False, "Signature mismatch"
 
-        # 4. 记录 nonce（防重放）
-        self._used_nonces.add(nonce)
-        # 清理过期的 nonce，防止内存膨胀
-        self._cleanup_nonces()
+        # ✅ 4. 记录 nonce（防重放）- 使用 Redis
+        try:
+            await self.redis.set(nonce_key, "1", ex=self._nonce_ttl)
+        except Exception as e:
+            logger.error(f"Redis 存储 Nonce 失败: {e}")
+            # 降级到内存存储
+            if not hasattr(self, '_used_nonces_memory'):
+                self._used_nonces_memory = set()
+            self._used_nonces_memory.add(nonce)
+            self._cleanup_memory_nonces()
         
         return True, "OK"
 
-    def _cleanup_nonces(self, max_size: int = 10000):
-        """清理过期的 nonce，防止内存膨胀"""
-        if len(self._used_nonces) > max_size:
-            # 保留最近的一半
-            self._used_nonces = set(list(self._used_nonces)[-max_size // 2:])
-            logger.debug(f"Cleaned up nonces, current size: {len(self._used_nonces)}")
+    def _cleanup_memory_nonces(self, max_size: int = 10000):
+        """清理过期的内存 nonce，防止内存膨胀（仅用于降级场景）"""
+        if hasattr(self, '_used_nonces_memory') and len(self._used_nonces_memory) > max_size:
+            self._used_nonces_memory = set(list(self._used_nonces_memory)[-max_size // 2:])
+            logger.debug(f"Cleaned up memory nonces, current size: {len(self._used_nonces_memory)}")
 
-    def clear_used_nonces(self):
+    async def clear_used_nonces(self):
         """清空已使用的 nonce（测试用）"""
-        self._used_nonces.clear()
+        # ✅ 清理 Redis 中的 nonce（通过模式匹配删除）
+        try:
+            keys = await self.redis.keys("hmac:nonce:*")
+            if keys:
+                for key in keys:
+                    await self.redis.delete(key)
+        except Exception as e:
+            logger.error(f"清理 Redis Nonce 失败: {e}")
+        
+        # 清理内存 nonce
+        if hasattr(self, '_used_nonces_memory'):
+            self._used_nonces_memory.clear()
 
 
 # 单例实例

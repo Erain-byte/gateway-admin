@@ -2,15 +2,20 @@
 配置管理器
 
 集中管理 HMAC 密钥和 CORS 配置到 Redis 和 Consul
+支持降级策略：Redis → Consul → 本地缓存
 """
 
 import json
+import os
 import secrets
 from typing import Optional, Dict, Any, List
+
+import consul
 from loguru import logger
 
 from app.utils.redis_manager import get_redis_manager
 from config import settings
+from config.settings import BASE_DIR
 
 
 class ConfigManager:
@@ -27,15 +32,22 @@ class ConfigManager:
     def __init__(self):
         self.redis = get_redis_manager()
         self._consul_enabled = settings.CONSUL_ENABLED
-        self._consul_client = None
+        self._consul_client: Optional[Any] = None
+        
+        # 本地缓存
+        self._cache_file = os.path.join(BASE_DIR, "data", "config_cache.json")
+        self._local_cache: Dict[str, Any] = {}
+        
         if self._consul_enabled:
             self._init_consul()
+        
+        # 加载本地缓存
+        self._load_local_cache()
 
     def _init_consul(self):
         """初始化 Consul 连接"""
         try:
-            import consul
-            self._consul_client = consul.Consul(
+            self._consul_client = consul.Consul(  # type: ignore 
                 host=settings.CONSUL_HOST,
                 port=settings.CONSUL_PORT,
                 token=settings.CONSUL_TOKEN,
@@ -48,11 +60,41 @@ class ConfigManager:
             self._consul_enabled = False
             self._consul_client = None
 
+    def _load_local_cache(self):
+        """加载本地缓存"""
+        try:
+            os.makedirs(os.path.dirname(self._cache_file), exist_ok=True)
+            if os.path.exists(self._cache_file):
+                with open(self._cache_file, "r", encoding="utf-8") as f:
+                    self._local_cache = json.load(f)
+                    logger.info(f"已加载 {len(self._local_cache)} 个配置项到本地缓存")
+        except Exception as e:
+            logger.warning(f"加载本地配置缓存失败: {e}")
+            self._local_cache = {}
+
+    def _save_local_cache(self):
+        """保存本地缓存"""
+        try:
+            os.makedirs(os.path.dirname(self._cache_file), exist_ok=True)
+            with open(self._cache_file, "w", encoding="utf-8") as f:
+                json.dump(self._local_cache, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"保存本地配置缓存失败: {e}")
+
+    def _cache_get(self, key: str) -> Optional[str]:
+        """从本地缓存获取"""
+        return self._local_cache.get(key)
+
+    def _cache_set(self, key: str, value: str):
+        """设置到本地缓存"""
+        self._local_cache[key] = value
+        self._save_local_cache()
+
     # ==================== HMAC 密钥管理 ====================
 
     async def create_hmac_key(self, app_id: str, secret_key: Optional[str] = None) -> str:
         """
-        创建或更新 HMAC 密钥（同步到 Redis 和 Consul）
+        创建或更新 HMAC 密钥（同步到 Redis、Consul 和本地缓存）
 
         Args:
             app_id: 应用标识
@@ -65,22 +107,30 @@ class ConfigManager:
             secret_key = secrets.token_urlsafe(32)
 
         key = f"{self.HMAC_KEY_PREFIX}{app_id}"
-        await self.redis.set(key, secret_key)
+        
+        # 1. 保存到 Redis
+        try:
+            await self.redis.set(key, secret_key)
+        except Exception as e:
+            logger.error(f"HMAC 密钥保存到 Redis 失败: {e}")
 
-        # 同步到 Consul KV
+        # 2. 同步到 Consul KV
         if self._consul_enabled and self._consul_client:
             try:
                 consul_key = f"{self.CONSUL_KV_PREFIX}hmac/{app_id}"
                 self._consul_client.kv.put(consul_key, secret_key)
             except Exception as e:
                 logger.error(f"HMAC 密钥同步到 Consul 失败: {e}")
+        
+        # 3. 同步到本地缓存（始终执行，作为兜底）
+        self._cache_set(key, secret_key)
 
         logger.info(f"HMAC密钥已创建/更新: {app_id}")
         return secret_key
 
     async def get_hmac_key(self, app_id: str) -> Optional[str]:
         """
-        获取 HMAC 密钥
+        获取 HMAC 密钥（降级策略：Redis → Consul → 本地缓存）
 
         Args:
             app_id: 应用标识
@@ -89,7 +139,30 @@ class ConfigManager:
             密钥，不存在返回 None
         """
         key = f"{self.HMAC_KEY_PREFIX}{app_id}"
-        return await self.redis.get(key)
+        
+        # 1. 优先从 Redis 获取
+        try:
+            value = await self.redis.get(key)
+            if value:
+                return value
+        except Exception as e:
+            logger.error(f"从 Redis 获取 HMAC 密钥失败: {e}")
+        
+        # 2. 从 Consul 获取
+        if self._consul_enabled and self._consul_client:
+            try:
+                consul_key = f"{self.CONSUL_KV_PREFIX}hmac/{app_id}"
+                _, data = self._consul_client.kv.get(consul_key)
+                if data and data.get('Value'):
+                    value = data['Value'].decode('utf-8') if isinstance(data['Value'], bytes) else data['Value']
+                    logger.debug(f"HMAC 密钥从 Consul 获取: {app_id}")
+                    return value
+            except Exception as e:
+                logger.warning(f"从 Consul 获取 HMAC 密钥失败: {e}")
+        
+        # 3. 从本地缓存获取
+        logger.warning(f"HMAC 密钥降级到本地缓存: {app_id}")
+        return self._cache_get(key)
 
     async def delete_hmac_key(self, app_id: str) -> bool:
         """
@@ -120,7 +193,7 @@ class ConfigManager:
 
     async def set_cors_config(self, config: Dict[str, Any]) -> bool:
         """
-        设置 CORS 配置（同步到 Redis 和 Consul）
+        设置 CORS 配置（同步到 Redis、Consul 和本地缓存）
 
         Args:
             config: CORS 配置字典
@@ -134,28 +207,37 @@ class ConfigManager:
         Returns:
             是否设置成功
         """
-        await self.redis.set(self.CORS_CONFIG_KEY, json.dumps(config))
+        config_json = json.dumps(config)
+        
+        # 1. 保存到 Redis
+        try:
+            await self.redis.set(self.CORS_CONFIG_KEY, config_json)
+        except Exception as e:
+            logger.error(f"CORS 配置保存到 Redis 失败: {e}")
 
-        # 同步到 Consul KV
+        # 2. 同步到 Consul KV
         if self._consul_enabled and self._consul_client:
             try:
                 consul_key = f"{self.CONSUL_KV_PREFIX}cors"
-                self._consul_client.kv.put(consul_key, json.dumps(config))
+                self._consul_client.kv.put(consul_key, config_json)
                 logger.info("CORS配置已同步到 Consul")
             except Exception as e:
                 logger.error(f"Consul KV 同步失败: {e}")
+        
+        # 3. 同步到本地缓存（始终执行，作为兜底）
+        self._cache_set(self.CORS_CONFIG_KEY, config_json)
 
         logger.info("CORS配置已更新")
         return True
 
     async def get_cors_config(self) -> Optional[Dict[str, Any]]:
         """
-        获取 CORS 配置（优先从 Consul 读取）
+        获取 CORS 配置（降级策略：Consul → Redis → 本地缓存）
 
         Returns:
             CORS 配置字典，不存在返回 None
         """
-        # 优先从 Consul 读取
+        # 1. 优先从 Consul 读取
         if self._consul_enabled and self._consul_client:
             try:
                 consul_key = f"{self.CONSUL_KV_PREFIX}cors"
@@ -166,11 +248,20 @@ class ConfigManager:
                     return json.loads(value)
             except Exception as e:
                 logger.warning(f"从 Consul 读取 CORS 配置失败: {e}")
-
-        # 回退到 Redis
-        data = await self.redis.get(self.CORS_CONFIG_KEY)
-        if data:
-            return json.loads(data)
+        
+        # 2. 从 Redis 获取
+        try:
+            data = await self.redis.get(self.CORS_CONFIG_KEY)
+            if data:
+                return json.loads(data)
+        except Exception as e:
+            logger.error(f"从 Redis 获取 CORS 配置失败: {e}")
+        
+        # 3. 从本地缓存获取
+        logger.warning("CORS 配置降级到本地缓存")
+        cached = self._cache_get(self.CORS_CONFIG_KEY)
+        if cached:
+            return json.loads(cached)
         return None
 
     async def update_cors_origins(self, origins: List[str]) -> bool:

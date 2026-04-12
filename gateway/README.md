@@ -2,6 +2,39 @@
 
 基于 FastAPI 的高性能 API 网关，提供服务注册发现、负载均衡、请求路由、安全认证等功能。
 
+## ⚡ 快速开始
+
+**首次运行请阅读 [QUICKSTART.md](QUICKSTART.md)**，包含详细的配置和启动说明。
+
+### 核心步骤
+
+1. **生成安全密钥**
+   ```bash
+   python generate_key.py
+   ```
+
+2. **配置环境变量**
+   ```bash
+   cp .env.example .env
+   # 编辑 .env 文件，修改 HMAC_SECRET_KEY、REDIS_PASSWORD 等
+   ```
+
+3. **启动服务**
+   ```bash
+   python main.py
+   ```
+
+---
+
+## 🔒 安全提示
+
+- ⚠️ **生产环境必须修改默认密钥**：`HMAC_SECRET_KEY`、`REDIS_PASSWORD`
+- ⚠️ **禁用调试模式**：设置 `DEBUG=False`
+- ⚠️ **启用 HTTPS**：配置 SSL 证书或使用反向代理
+- ⚠️ **严格限制 CORS**：只允许信任的域名
+
+详见 [QUICKSTART.md](QUICKSTART.md) 的生产环境检查清单。
+
 ## 技术栈
 
 - **框架**: FastAPI 0.135.3

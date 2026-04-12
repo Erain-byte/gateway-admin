@@ -1,6 +1,7 @@
 """
 数据库初始化和迁移
 """
+import asyncio
 from app.database_pool import db_manager
 
 
@@ -10,15 +11,16 @@ def create_db_and_tables():
     print("数据库表创建完成")
 
 
-def init_default_data():
-    """初始化默认数据"""
+async def init_default_data():
+    """初始化默认数据（异步）"""
     from app.models.schemas import Admin, Role, Permission, Menu
     from app.services.password_service import password_service
-    from sqlmodel import select
+    from sqlalchemy import select
     
-    with db_manager.get_session() as session:
+    async with db_manager.AsyncSessionLocal() as session:
         # 检查是否已有管理员
-        admin = session.exec(select(Admin).where(Admin.username == "admin")).first()
+        result = await session.execute(select(Admin).where(Admin.username == "admin"))
+        admin = result.scalar_one_or_none()
         if not admin:
             admin = Admin(
                 username="admin",
@@ -30,7 +32,8 @@ def init_default_data():
             session.add(admin)
         
         # 检查是否已有角色
-        admin_role = session.exec(select(Role).where(Role.code == "admin")).first()
+        result = await session.execute(select(Role).where(Role.code == "admin"))
+        admin_role = result.scalar_one_or_none()
         if not admin_role:
             admin_role = Role(
                 code="admin",
@@ -53,7 +56,8 @@ def init_default_data():
         ]
         
         for code, name in default_permissions:
-            perm = session.exec(select(Permission).where(Permission.code == code)).first()
+            result = await session.execute(select(Permission).where(Permission.code == code))
+            perm = result.scalar_one_or_none()
             if not perm:
                 perm = Permission(code=code, name=name)
                 session.add(perm)
@@ -70,15 +74,15 @@ def init_default_data():
         ]
         
         for menu_data in default_menus:
-            menu = session.get(Menu, menu_data["id"])
+            menu = await session.get(Menu, menu_data["id"])
             if not menu:
                 menu = Menu(**menu_data)
                 session.add(menu)
         
-        session.commit()
+        await session.commit()
         print("默认数据初始化完成")
 
 
 if __name__ == "__main__":
     create_db_and_tables()
-    init_default_data()
+    asyncio.run(init_default_data())

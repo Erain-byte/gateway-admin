@@ -3,9 +3,15 @@
 管理应用的各种配置参数
 """
 
+import os
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator
 from typing import Optional
+
+
+# 项目根目录
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class Settings(BaseSettings):
@@ -52,7 +58,7 @@ class Settings(BaseSettings):
    # JWT_SECRET_KEY: str = "4Wrx1pS4BxDBCuAdXokNqgrinR2E8JlGlma5pxC8V-k"
    # JWT_ALGORITHM: str = "HS256"
     #JWT_EXPIRE_MINUTES: int = 60 * 24  # 24小时
-    HMAC_SECRET_KEY: str = "KQR10tMcAKcHBTTicgISB_KGmQXMqO8iuH4-H8RKgfQ"
+    HMAC_SECRET_KEY: str = ""  # ✅ 生产环境必须通过环境变量或 .env 文件配置
     HMAC_ENABLED: bool = True  # 是否启用 HMAC 验证
     HMAC_TIMESTAMP_TOLERANCE: int = 300  # 时间戳容差（秒）
     # 日志配置

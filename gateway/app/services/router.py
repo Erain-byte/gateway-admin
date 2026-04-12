@@ -70,7 +70,7 @@ class Router:
 
         # 3. 检查熔断器
         cb = self._get_circuit_breaker(service_name)
-        if cb.is_open:
+        if cb.is_open:  # ✅ 恢复为同步调用
             logger.warning(f"Circuit breaker open for service: {service_name}")
             return JSONResponse(
                 status_code=503,
@@ -158,12 +158,16 @@ class Router:
         Returns:
             后端响应
         """
-        # 构建目标 URL
-        base_url = backend.url.replace("http://", "").replace("https://", "")
+        # ✅ 构建目标 URL（正确处理路径）
+        base_url = backend.url.rstrip("/")
         path = request.url.path.lstrip("/")
         remaining_path = "/".join(path.split("/")[1:]) if "/" in path else ""
-
-        target_url = f"http://{base_url}/{remaining_path}"
+        
+        # ✅ 避免双斜杠
+        if remaining_path:
+            target_url = f"{base_url}/{remaining_path}"
+        else:
+            target_url = base_url
 
         # 构建请求头
         headers = dict(request.headers)

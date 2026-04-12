@@ -1,616 +1,503 @@
-#redis管理器
-# Redis连接池管理模块
+"""
+Redis 客户端管理器
 
+提供全局唯一的 Redis 客户端实例，统一管理连接池和生命周期
+"""
 import asyncio
 import threading
-from typing import Optional, Dict, Set, List, Any
-import logging
+from typing import Optional, Any
 
-import redis.asyncio as redis
+from redis.asyncio import Redis
 from redis.asyncio.cluster import RedisCluster
 
 from config import settings
 
-# 配置日志
-logger = logging.getLogger(__name__)
+# 全局客户端实例
+_client: Optional[Redis] = None
+_cluster: Optional[RedisCluster] = None
+_lock: threading.Lock = threading.Lock()
+_is_cluster_mode: bool = False
 
+
+def _init_pool():
+    """初始化连接池"""
+    global _client, _cluster, _is_cluster_mode
+    
+    _is_cluster_mode = settings.REDIS_CLUSTER_MODE
+    
+    if _is_cluster_mode:
+        _init_cluster()
+    else:
+        _init_standalone()
+
+
+def _init_standalone():
+    """初始化单机模式"""
+    global _client
+    from redis.asyncio import ConnectionPool
+    
+    pool = ConnectionPool(
+        host=settings.REDIS_HOST,
+        port=settings.REDIS_PORT,
+        db=settings.REDIS_DB,
+        password=settings.REDIS_PASSWORD if settings.REDIS_PASSWORD else None,
+        max_connections=settings.REDIS_POOL_SIZE,
+        decode_responses=settings.REDIS_DECODE_RESPONSES,
+        socket_timeout=settings.REDIS_SOCKET_TIMEOUT,
+        socket_connect_timeout=settings.REDIS_SOCKET_CONNECT_TIMEOUT,
+    )
+    _client = Redis(connection_pool=pool)
+
+
+def _init_cluster():
+    """初始化集群模式"""
+    global _cluster
+    
+    cluster_nodes = settings.REDIS_CLUSTER_NODES
+    if not cluster_nodes:
+        cluster_nodes = [f"{settings.REDIS_HOST}:{settings.REDIS_PORT}"]
+
+    primary_node = cluster_nodes[0]
+    if ':' in primary_node:
+        host, port = primary_node.split(':', 1)
+        url = f"redis://:{settings.REDIS_PASSWORD}@{host}:{port}/0" if settings.REDIS_PASSWORD else f"redis://{host}:{port}/0"
+    else:
+        url = f"redis://:{settings.REDIS_PASSWORD}@{primary_node}:6379/0" if settings.REDIS_PASSWORD else f"redis://{primary_node}:6379/0"
+
+    _cluster = RedisCluster.from_url(
+        url,
+        max_connections=settings.REDIS_POOL_SIZE,
+        decode_responses=settings.REDIS_DECODE_RESPONSES,
+    )
+    _client = _cluster
+
+
+def get_client() -> Redis:  # type: ignore
+    """获取全局 Redis 客户端实例（线程安全，延迟初始化）"""
+    global _client
+    
+    if _client is None:
+        with _lock:
+            if _client is None:
+                _init_pool()
+    
+    return _client  # type: ignore
+
+
+async def close():
+    """关闭 Redis 客户端"""
+    global _client, _cluster
+    
+    with _lock:
+        if _client is not None:
+            await _client.aclose()
+            _client = None
+            _cluster = None
+
+
+async def ping() -> bool:
+    """检查 Redis 连接是否正常"""
+    try:
+        client = get_client()
+        # ping() 是同步方法，返回布尔值或字符串 "PONG"
+        result = client.ping()
+        return result is True or result == b"PONG" or result == "PONG"
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis PING 操作失败: {e}")
+        return False
+
+
+# ==================== 便捷方法（直接代理到客户端） ====================
+
+async def keys(pattern: str) -> list:
+    """获取匹配的键列表"""
+    try:
+        client = get_client()
+        return await client.keys(pattern)
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis KEYS 操作失败: {e}")
+        return []
+
+
+async def get(key: str) -> Optional[str]:
+    """获取键值"""
+    try:
+        client = get_client()
+        return await client.get(key)
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis GET 操作失败: {e}")
+        return None
+
+
+async def set(key: str, value: str, ex: Optional[int] = None) -> bool:
+    """设置键值"""
+    try:
+        client = get_client()
+        await client.set(key, value, ex=ex)
+        return True
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis SET 操作失败: {e}")
+        return False
+
+
+async def delete(key: str) -> bool:
+    """删除键"""
+    try:
+        client = get_client()
+        await client.delete(key)
+        return True
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis DELETE 操作失败: {e}")
+        return False
+
+
+async def exists(key: str) -> bool:
+    """检查键是否存在"""
+    try:
+        client = get_client()
+        return await client.exists(key) > 0
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis EXISTS 操作失败: {e}")
+        return False
+
+
+async def expire(key: str, seconds: int) -> bool:
+    """设置键的过期时间"""
+    try:
+        client = get_client()
+        await client.expire(key, seconds)
+        return True
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis EXPIRE 操作失败: {e}")
+        return False
+
+
+async def ttl(key: str) -> int:
+    """获取键的剩余过期时间"""
+    try:
+        client = get_client()
+        return await client.ttl(key)
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis TTL 操作失败: {e}")
+        return -2
+
+
+async def hget(name: str, key: str) -> Optional[str]:
+    """获取哈希表中的字段值"""
+    try:
+        client = get_client()
+        return await client.hget(name, key)# type: ignore
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis HGET 操作失败: {e}")
+        return None
+
+
+async def hset(name: str, key: str, value: str) -> bool:
+    """设置哈希表中的字段值"""
+    try:
+        client = get_client()
+        await client.hset(name, key, value)  # type: ignore
+        return True
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis HSET 操作失败: {e}")
+        return False
+
+
+async def hgetall(name: str) -> dict:
+    """获取哈希表中的所有字段"""
+    try:
+        client = get_client()
+        return await client.hgetall(name) # type: ignore
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis HGETALL 操作失败: {e}")
+        return {}
+
+
+async def hdel(name: str, *keys) -> bool:
+    """删除哈希表中的字段"""
+    try:
+        client = get_client()
+        await client.hdel(name, *keys) # type: ignore
+        return True
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis HDEL 操作失败: {e}")
+        return False
+
+
+async def lpush(name: str, *values) -> int:
+    """将值插入到列表头部"""
+    try:
+        client = get_client()
+        return await client.lpush(name, *values) # type: ignore
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis LPUSH 操作失败: {e}")
+        return 0
+
+
+async def rpush(name: str, *values) -> int:
+    """将值插入到列表尾部"""
+    try:
+        client = get_client()
+        return await client.rpush(name, *values) # type: ignore
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis RPUSH 操作失败: {e}")
+        return 0
+
+
+async def lpop(name: str) -> Optional[str]:
+    """移出并获取列表的第一个元素"""
+    try:
+        client = get_client()
+        return await client.lpop(name) # type: ignore
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis LPOP 操作失败: {e}")
+        return None
+
+
+async def rpop(name: str) -> Optional[str]:
+    """移出并获取列表的最后一个元素"""
+    try:
+        client = get_client()
+        return await client.rpop(name) # type: ignore
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis RPOP 操作失败: {e}")
+        return None
+
+
+async def lrange(name: str, start: int, end: int) -> list:
+    """获取列表指定范围内的元素"""
+    try:
+        client = get_client()
+        return await client.lrange(name, start, end) # type: ignore
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis LRANGE 操作失败: {e}")
+        return []
+
+
+async def sadd(name: str, *values) -> int:
+    """向集合添加成员"""
+    try:
+        client = get_client()
+        return await client.sadd(name, *values) # type: ignore
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis SADD 操作失败: {e}")
+        return 0
+
+
+async def srem(name: str, *values) -> int:
+    """移除集合中的成员"""
+    try:
+        client = get_client()
+        return await client.srem(name, *values) # type: ignore
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis SREM 操作失败: {e}")
+        return 0
+
+
+async def smembers(name: str) -> set:  # type: ignore
+    """获取集合中的所有成员"""
+    try:
+        client = get_client()
+        return await client.smembers(name) # type: ignore
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis SMEMBERS 操作失败: {e}")
+        return set()  # type: ignore
+
+
+async def sismember(name: str, value: str) -> bool:
+    """判断成员是否是集合的成员"""
+    try:
+        client = get_client()
+        return await client.sismember(name, value) # type: ignore
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis SISMEMBER 操作失败: {e}")
+        return False
+
+
+async def zadd(name: str, mapping: dict) -> int:
+    """向有序集合添加成员"""
+    try:
+        client = get_client()
+        return await client.zadd(name, mapping)
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis ZADD 操作失败: {e}")
+        return 0
+
+
+async def zrem(name: str, *values) -> int:
+    """移除有序集合中的成员"""
+    try:
+        client = get_client()
+        return await client.zrem(name, *values)
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis ZREM 操作失败: {e}")
+        return 0
+
+
+async def zrange(name: str, start: int = 0, end: int = -1) -> list:
+    """获取有序集合中指定范围内的成员"""
+    try:
+        client = get_client()
+        return await client.zrange(name, start, end)
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis ZRANGE 操作失败: {e}")
+        return []
+
+
+async def zscore(name: str, value: str) -> Optional[float]:
+    """获取有序集合中成员的分数"""
+    try:
+        client = get_client()
+        return await client.zscore(name, value)
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis ZSCORE 操作失败: {e}")
+        return None
+
+
+async def zremrangebyscore(name: str, min_score: float, max_score: float) -> int:
+    """移除有序集合中指定分数范围的成员"""
+    try:
+        client = get_client()
+        return await client.zremrangebyscore(name, min_score, max_score)  # type: ignore
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis ZREMRANGEBYSCORE 操作失败: {e}")
+        return 0
+
+
+async def zcard(name: str) -> int:
+    """获取有序集合的成员数"""
+    try:
+        client = get_client()
+        return await client.zcard(name)  # type: ignore
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Redis ZCARD 操作失败: {e}")
+        return 0
+
+
+# ==================== 兼容旧接口 ====================
 
 class RedisManager:
-    """Redis连接池管理器（支持单机和集群模式，线程安全）"""
-
-    _instance: Optional['RedisManager'] = None
-    _lock: threading.Lock = threading.Lock()
-    _init_lock: threading.Lock = threading.Lock()
+    """兼容旧接口的包装类，所有方法代理到模块级函数"""
     
-    _pool: Optional[Any] = None
-    _cluster: Optional[Any] = None
-    _is_cluster_mode: bool = False
-
+    _instance: Optional['RedisManager'] = None
+    
     def __new__(cls):
-        """单例模式（线程安全）"""
         if cls._instance is None:
-            with cls._lock:
-                # 双重检查锁定
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
+            cls._instance = super().__new__(cls)
         return cls._instance
-
-    def __init__(self):
-        """初始化Redis连接池"""
-        with self._init_lock:
-            if self._pool is None and self._cluster is None:
-                self._init_pool()
-
-    def _init_pool(self):
-        """初始化Redis连接池"""
-        try:
-            self._is_cluster_mode = settings.REDIS_CLUSTER_MODE
-            if self._is_cluster_mode:
-                self._init_cluster()
-            else:
-                self._init_standalone()
-        except Exception as e:
-            logger.error(f"Redis连接池初始化失败: {str(e)}")
-            raise
-
-    def _init_standalone(self):
-        """初始化单机模式连接池"""
-        self._pool = redis.ConnectionPool(
-            host=settings.REDIS_HOST,
-            port=settings.REDIS_PORT,
-            db=settings.REDIS_DB,
-            password=settings.REDIS_PASSWORD if settings.REDIS_PASSWORD else None,
-            max_connections=settings.REDIS_POOL_SIZE,
-            decode_responses=settings.REDIS_DECODE_RESPONSES,
-            socket_timeout=settings.REDIS_SOCKET_TIMEOUT,
-            socket_connect_timeout=settings.REDIS_SOCKET_CONNECT_TIMEOUT,
-        )
-        logger.info(f"Redis单机模式连接池初始化成功: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
-
-    def _init_cluster(self):
-        """初始化集群模式连接"""
-        cluster_nodes = settings.REDIS_CLUSTER_NODES
-        if not cluster_nodes:
-            cluster_nodes = [f"{settings.REDIS_HOST}:{settings.REDIS_PORT}"]
-            logger.warning("未配置集群节点，使用单机地址作为唯一节点")
-
-        # 使用第一个节点作为连接入口
-        primary_node = cluster_nodes[0]
-        if ':' in primary_node:
-            host, port = primary_node.split(':', 1)
-            url = f"redis://:{settings.REDIS_PASSWORD}@{host}:{port}/0" if settings.REDIS_PASSWORD else f"redis://{host}:{port}/0"
-        else:
-            url = f"redis://:{settings.REDIS_PASSWORD}@{primary_node}:6379/0" if settings.REDIS_PASSWORD else f"redis://{primary_node}:6379/0"
-
-        self._cluster = RedisCluster.from_url(
-            url,
-            max_connections=settings.REDIS_POOL_SIZE,
-            decode_responses=settings.REDIS_DECODE_RESPONSES,
-        )
-        logger.info(f"Redis集群模式初始化成功: {cluster_nodes}")
-
-    def _get_client(self) -> Any:
-        """获取Redis客户端"""
-        if self._is_cluster_mode:
-            return self._cluster
-        return redis.Redis(connection_pool=self._pool)
-
-    async def _close_client(self, client: Any):
-        """关闭客户端（集群模式下无需关闭）"""
-        if not self._is_cluster_mode and client is not None:
-            await client.aclose()
-
-    async def get_connection(self):
-        """获取Redis连接（兼容旧接口）"""
-        return self._get_client()
-
-    async def get_client(self):
-        """获取Redis客户端（测试连接用）"""
-        return self._get_client()
+    
     async def keys(self, pattern: str) -> list:
-        """获取匹配的键列表"""
-        client = self._get_client()
-        try:
-            return await client.keys(pattern)
-        except Exception as e:
-            logger.error(f"Redis KEYS操作失败: {str(e)}")
-            return []
-        finally:
-            await self._close_client(client)
-
-    async def close(self):
-        """关闭Redis连接池"""
-        if self._is_cluster_mode:
-            if self._cluster:
-                await self._cluster.aclose()
-                logger.info("Redis集群连接已关闭")
-        else:
-            if self._pool:
-                await self._pool.disconnect()
-                logger.info("Redis单机连接池已关闭")
-
-    async def __aenter__(self):
-        """支持上下文管理器"""
-        return self
-
-    async def __aexit__(self, _exc_type, _exc_val, _exc_tb):
-        """上下文管理器退出时关闭连接池"""
-        await self.close()
-
+        return await keys(pattern)
+    
     async def get(self, key: str) -> Optional[str]:
-        """
-        获取键值
-
-        Args:
-            key: 键名
-
-        Returns:
-            Optional[str]: 键值，如果不存在则返回None
-        """
-        client = self._get_client()
-        try:
-            return await client.get(key)
-        except Exception as e:
-            logger.error(f"Redis GET操作失败: {str(e)}")
-            return None
-        finally:
-            await self._close_client(client)
-
+        return await get(key)
+    
     async def set(self, key: str, value: str, ex: Optional[int] = None) -> bool:
-        """
-        设置键值
-
-        Args:
-            key: 键名
-            value: 键值
-            ex: 过期时间（秒）
-
-        Returns:
-            bool: 是否设置成功
-        """
-        client = self._get_client()
-        try:
-            await client.set(key, value, ex=ex)
-            return True
-        except Exception as e:
-            logger.error(f"Redis SET操作失败: {str(e)}")
-            return False
-        finally:
-            await self._close_client(client)
-
+        return await set(key, value, ex)
+    
     async def delete(self, key: str) -> bool:
-        """
-        删除键
-
-        Args:
-            key: 键名
-
-        Returns:
-            bool: 是否删除成功
-        """
-        client = self._get_client()
-        try:
-            await client.delete(key)
-            return True
-        except Exception as e:
-            logger.error(f"Redis DELETE操作失败: {str(e)}")
-            return False
-        finally:
-            await self._close_client(client)
-
+        return await delete(key)
+    
     async def exists(self, key: str) -> bool:
-        """
-        检查键是否存在
-
-        Args:
-            key: 键名
-
-        Returns:
-            bool: 键是否存在
-        """
-        client = self._get_client()
-        try:
-            return await client.exists(key) > 0
-        except Exception as e:
-            logger.error(f"Redis EXISTS操作失败: {str(e)}")
-            return False
-        finally:
-            await self._close_client(client)
-
+        return await exists(key)
+    
     async def expire(self, key: str, seconds: int) -> bool:
-        """
-        设置键的过期时间
-
-        Args:
-            key: 键名
-            seconds: 过期时间（秒）
-
-        Returns:
-            bool: 是否设置成功
-        """
-        client = self._get_client()
-        try:
-            await client.expire(key, seconds)
-            return True
-        except Exception as e:
-            logger.error(f"Redis EXPIRE操作失败: {str(e)}")
-            return False
-        finally:
-            await self._close_client(client)
-
+        return await expire(key, seconds)
+    
     async def ttl(self, key: str) -> int:
-        """
-        获取键的剩余过期时间
-
-        Args:
-            key: 键名
-
-        Returns:
-            int: 剩余时间（秒），-1表示永不过期，-2表示键不存在
-        """
-        client = self._get_client()
-        try:
-            return await client.ttl(key)
-        except Exception as e:
-            logger.error(f"Redis TTL操作失败: {str(e)}")
-            return -2
-        finally:
-            await self._close_client(client)
-
+        return await ttl(key)
+    
     async def hget(self, name: str, key: str) -> Optional[str]:
-        """
-        获取哈希表中的字段值
-
-        Args:
-            name: 哈希表名
-            key: 字段名
-
-        Returns:
-            Optional[str]: 字段值
-        """
-        client = self._get_client()
-        try:
-            return await client.hget(name, key)
-        except Exception as e:
-            logger.error(f"Redis HGET操作失败: {str(e)}")
-            return None
-        finally:
-            await self._close_client(client)
-
+        return await hget(name, key)
+    
     async def hset(self, name: str, key: str, value: str) -> bool:
-        """
-        设置哈希表中的字段值
-
-        Args:
-            name: 哈希表名
-            key: 字段名
-            value: 字段值
-
-        Returns:
-            bool: 是否设置成功
-        """
-        client = self._get_client()
-        try:
-            await client.hset(name, key, value)
-            return True
-        except Exception as e:
-            logger.error(f"Redis HSET操作失败: {str(e)}")
-            return False
-        finally:
-            await self._close_client(client)
-
-    async def hgetall(self, name: str) -> Dict[str, str]:
-        """
-        获取哈希表中的所有字段
-
-        Args:
-            name: 哈希表名
-
-        Returns:
-            Dict[str, str]: 哈希表中的所有字段
-        """
-        client = self._get_client()
-        try:
-            return await client.hgetall(name)
-        except Exception as e:
-            logger.error(f"Redis HGETALL操作失败: {str(e)}")
-            return {}
-        finally:
-            await self._close_client(client)
-
+        return await hset(name, key, value)
+    
+    async def hgetall(self, name: str) -> dict:
+        return await hgetall(name)
+    
     async def hdel(self, name: str, *keys) -> bool:
-        """
-        删除哈希表中的字段
-
-        Args:
-            name: 哈希表名
-            keys: 字段名
-
-        Returns:
-            bool: 是否删除成功
-        """
-        client = self._get_client()
-        try:
-            await client.hdel(name, *keys)
-            return True
-        except Exception as e:
-            logger.error(f"Redis HDEL操作失败: {str(e)}")
-            return False
-        finally:
-            await self._close_client(client)
-
+        return await hdel(name, *keys)
+    
     async def lpush(self, name: str, *values) -> int:
-        """
-        将一个或多个值插入到列表头部
-
-        Args:
-            name: 列表名
-            values: 值
-
-        Returns:
-            int: 列表长度
-        """
-        client = self._get_client()
-        try:
-            return await client.lpush(name, *values)
-        except Exception as e:
-            logger.error(f"Redis LPUSH操作失败: {str(e)}")
-            return 0
-        finally:
-            await self._close_client(client)
-
+        return await lpush(name, *values)
+    
     async def rpush(self, name: str, *values) -> int:
-        """
-        将一个或多个值插入到列表尾部
-
-        Args:
-            name: 列表名
-            values: 值
-
-        Returns:
-            int: 列表长度
-        """
-        client = self._get_client()
-        try:
-            return await client.rpush(name, *values)
-        except Exception as e:
-            logger.error(f"Redis RPUSH操作失败: {str(e)}")
-            return 0
-        finally:
-            await self._close_client(client)
-
+        return await rpush(name, *values)
+    
     async def lpop(self, name: str) -> Optional[str]:
-        """
-        移出并获取列表的第一个元素
-
-        Args:
-            name: 列表名
-
-        Returns:
-            Optional[str]: 元素值
-        """
-        client = self._get_client()
-        try:
-            return await client.lpop(name)
-        except Exception as e:
-            logger.error(f"Redis LPOP操作失败: {str(e)}")
-            return None
-        finally:
-            await self._close_client(client)
-
+        return await lpop(name)
+    
     async def rpop(self, name: str) -> Optional[str]:
-        """
-        移出并获取列表的最后一个元素
-
-        Args:
-            name: 列表名
-
-        Returns:
-            Optional[str]: 元素值
-        """
-        client = self._get_client()
-        try:
-            return await client.rpop(name)
-        except Exception as e:
-            logger.error(f"Redis RPOP操作失败: {str(e)}")
-            return None
-        finally:
-            await self._close_client(client)
-
-    async def lrange(self, name: str, start: int, end: int) -> List[str]:
-        """
-        获取列表指定范围内的元素
-
-        Args:
-            name: 列表名
-            start: 起始位置
-            end: 结束位置
-
-        Returns:
-            List[str]: 元素列表
-        """
-        client = self._get_client()
-        try:
-            return await client.lrange(name, start, end)
-        except Exception as e:
-            logger.error(f"Redis LRANGE操作失败: {str(e)}")
-            return []
-        finally:
-            await self._close_client(client)
-
+        return await rpop(name)
+    
+    async def lrange(self, name: str, start: int, end: int) -> list:
+        return await lrange(name, start, end)
+    
     async def sadd(self, name: str, *values) -> int:
-        """
-        向集合添加一个或多个成员
-
-        Args:
-            name: 集合名
-            values: 成员值
-
-        Returns:
-            int: 新添加的成员数量
-        """
-        client = self._get_client()
-        try:
-            return await client.sadd(name, *values)
-        except Exception as e:
-            logger.error(f"Redis SADD操作失败: {str(e)}")
-            return 0
-        finally:
-            await self._close_client(client)
-
+        return await sadd(name, *values)
+    
     async def srem(self, name: str, *values) -> int:
-        """
-        移除集合中的一个或多个成员
-
-        Args:
-            name: 集合名
-            values: 成员值
-
-        Returns:
-            int: 移除的成员数量
-        """
-        client = self._get_client()
-        try:
-            return await client.srem(name, *values)
-        except Exception as e:
-            logger.error(f"Redis SREM操作失败: {str(e)}")
-            return 0
-        finally:
-            await self._close_client(client)
-
-    async def smembers(self, name: str) -> Set[str]:
-        """
-        获取集合中的所有成员
-
-        Args:
-            name: 集合名
-
-        Returns:
-            Set[str]: 成员集合
-        """
-        client = self._get_client()
-        try:
-            return await client.smembers(name)
-        except Exception as e:
-            logger.error(f"Redis SMEMBERS操作失败: {str(e)}")
-            return set()
-        finally:
-            await self._close_client(client)
-
+        return await srem(name, *values)
+    
+    async def smembers(self, name: str) -> set: # type: ignore
+        return await smembers(name)
+    
     async def sismember(self, name: str, value: str) -> bool:
-        """
-        判断成员是否是集合的成员
-
-        Args:
-            name: 集合名
-            value: 成员值
-
-        Returns:
-            bool: 是否是成员
-        """
-        client = self._get_client()
-        try:
-            return await client.sismember(name, value)
-        except Exception as e:
-            logger.error(f"Redis SISMEMBER操作失败: {str(e)}")
-            return False
-        finally:
-            await self._close_client(client)
-
-    async def zadd(self, name: str, mapping: Dict[str, float]) -> int:
-        """
-        向有序集合添加一个或多个成员
-
-        Args:
-            name: 有序集合名
-            mapping: 成员和分数的映射
-
-        Returns:
-            int: 新添加的成员数量
-        """
-        client = self._get_client()
-        try:
-            return await client.zadd(name, mapping)
-        except Exception as e:
-            logger.error(f"Redis ZADD操作失败: {str(e)}")
-            return 0
-        finally:
-            await self._close_client(client)
-
+        return await sismember(name, value)
+    
+    async def zadd(self, name: str, mapping: dict) -> int:
+        return await zadd(name, mapping)
+    
     async def zrem(self, name: str, *values) -> int:
-        """
-        移除有序集合中的一个或多个成员
-
-        Args:
-            name: 有序集合名
-            values: 成员值
-
-        Returns:
-            int: 移除的成员数量
-        """
-        client = self._get_client()
-        try:
-            return await client.zrem(name, *values)
-        except Exception as e:
-            logger.error(f"Redis ZREM操作失败: {str(e)}")
-            return 0
-        finally:
-            await self._close_client(client)
-
-    async def zrange(self, name: str, start: int = 0, end: int = -1) -> List[str]:
-        """
-        获取有序集合中指定范围内的成员
-
-        Args:
-            name: 有序集合名
-            start: 起始位置
-            end: 结束位置
-
-        Returns:
-            List[str]: 成员列表
-        """
-        client = self._get_client()
-        try:
-            return await client.zrange(name, start, end)
-        except Exception as e:
-            logger.error(f"Redis ZRANGE操作失败: {str(e)}")
-            return []
-        finally:
-            await self._close_client(client)
-
+        return await zrem(name, *values)
+    
+    async def zrange(self, name: str, start: int = 0, end: int = -1) -> list:
+        return await zrange(name, start, end)
+    
     async def zscore(self, name: str, value: str) -> Optional[float]:
-        """
-        获取有序集合中成员的分数
-
-        Args:
-            name: 有序集合名
-            value: 成员值
-
-        Returns:
-            Optional[float]: 成员分数
-        """
-        client = self._get_client()
-        try:
-            return await client.zscore(name, value)
-        except Exception as e:
-            logger.error(f"Redis ZSCORE操作失败: {str(e)}")
-            return None
-        finally:
-            await self._close_client(client)
-
-
-# 创建全局Redis管理器实例
-redis_manager = None
+        return await zscore(name, value)
+    
+    async def zremrangebyscore(self, name: str, min_score: float, max_score: float) -> int:
+        return await zremrangebyscore(name, min_score, max_score)
+    
+    async def zcard(self, name: str) -> int:
+        return await zcard(name)
+    
+    async def close(self):
+        await close()
+    
+    async def ping(self) -> bool:
+        return await ping()
 
 
 def get_redis_manager() -> RedisManager:
-    """
-    获取Redis管理器实例
-
-    Returns:
-        RedisManager: Redis管理器实例
-    """
-    global redis_manager
-    if redis_manager is None:
-        redis_manager = RedisManager()
-    return redis_manager
+    """获取 Redis 管理器实例（兼容旧代码）"""
+    return RedisManager()

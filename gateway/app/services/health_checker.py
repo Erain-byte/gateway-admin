@@ -7,6 +7,7 @@
 
 import asyncio
 import json
+from typing import Optional
 from loguru import logger
 from config import settings
 from app.utils.redis_manager import get_redis_manager
@@ -16,7 +17,7 @@ from app.models.service import ServiceBase
 
 class HealthChecker:
 
-    def __init__(self,name:str,host:str,port:int,interval:int=10):
+    def __init__(self, name: str, host: str, port: int, interval: int = 10):
         self.name = name
         self.host = host
         self.port = port
@@ -24,6 +25,7 @@ class HealthChecker:
         self.redis_manager = get_redis_manager()
         self.consul_manager = get_consul_manager()
         self.http_client = get_http_client()
+        self._running = False  # ✅ 添加运行状态标志
 
     async def _get_healthy_services(self, service_name: str) -> list[ServiceBase]:
         """
@@ -87,21 +89,38 @@ class HealthChecker:
         """
         启动健康检查循环
         """
-        while True:
+        self._running = True  # ✅ 设置运行状态
+        logger.info(f"Health checker started for service: {self.name}")
+        
+        while self._running:  # ✅ 使用运行状态控制循环
             try:
                 # 获取所有服务实例
                 services = await self._get_healthy_services(self.name)
                 for service in services:
                     is_healthy = await self._check_service_health(service)
                     if is_healthy:
-                       
                         logger.info(f"Service {service.name} is healthy")
                     else:
                         logger.warning(f"Service {service.name} is unhealthy")
                     await self._update_service_status(service, is_healthy)
+            except asyncio.CancelledError:
+                logger.info(f"Health checker for {self.name} cancelled")
+                break
             except Exception as e:
                 logger.error(f"Error during health check: {e}")
-            await asyncio.sleep(self.interval)
+            
+            # ✅ 使用 wait_for 支持快速退出
+            try:
+                await asyncio.wait_for(asyncio.sleep(self.interval), timeout=self.interval)
+            except asyncio.TimeoutError:
+                pass
+        
+        logger.info(f"Health checker stopped for service: {self.name}")
+
+    async def stop(self):
+        """✅ 停止健康检查"""
+        self._running = False
+        logger.info(f"Stopping health checker for service: {self.name}")
 
     async def _update_service_status(self, service_instance: ServiceBase, is_healthy: bool):
         """

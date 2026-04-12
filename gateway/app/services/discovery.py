@@ -4,11 +4,14 @@
 - 服务注册：服务实例启动时向注册中心注册自己的信息
 - 服务发现：其他服务或客户端通过注册中心查询可用的服务实例列表
 - 健康检查/注销：由 Gateway health_checker 自动完成
+- 容灾降级：Redis → Consul → 本地缓存
 """
 import json
+import os
 from typing import Optional
 from loguru import logger   
 from config import settings
+from config.settings import BASE_DIR
 from app.utils.redis_manager import get_redis_manager
 from app.utils.consul_manager import get_consul_manager
 from app.models.service import ServiceBase
@@ -19,10 +22,44 @@ class ServiceDiscovery:
     def __init__(self):
         self.redis_manager = get_redis_manager()
         self.consul_manager = get_consul_manager()
+        # 本地缓存路径
+        self._cache_file = os.path.join(BASE_DIR, "data", "services_cache.json")
+        # 内存缓存: {f"{service_name}:{service_id}": ServiceBase}
+        self._local_cache: dict[str, ServiceBase] = {}
+        # 加载本地缓存
+        self._load_local_cache()
+
+    def _load_local_cache(self):
+        """加载本地缓存"""
+        try:
+            # 确保目录存在
+            os.makedirs(os.path.dirname(self._cache_file), exist_ok=True)
+            if os.path.exists(self._cache_file):
+                with open(self._cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    for key, value in data.items():
+                        self._local_cache[key] = ServiceBase(**value)
+                    logger.info(f"Loaded {len(self._local_cache)} services from local cache")
+        except Exception as e:
+            logger.warning(f"Failed to load local cache: {e}")
+
+    def _save_local_cache(self):
+        """保存本地缓存到文件"""
+        try:
+            os.makedirs(os.path.dirname(self._cache_file), exist_ok=True)
+            data = {k: v.model_dump() for k, v in self._local_cache.items()}
+            with open(self._cache_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save local cache: {e}")
+
+    def _cache_key(self, service_name: str, service_id: str) -> str:
+        """生成缓存键"""
+        return f"{service_name}:{service_id}"
 
     async def register_service(self, service: ServiceBase) -> bool:
         """
-        注册服务实例到注册中心（双写模式：Redis + Consul）
+        注册服务实例到注册中心（双写模式：Redis + Consul + 本地缓存）
         
         Args:
             service: 服务实例对象
@@ -33,7 +70,7 @@ class ServiceDiscovery:
         redis_ok = False
         consul_ok = False
         
-        # 1. 注册到 Redis（始终写入，作为缓存/快速访问）
+        # 1. 注册到 Redis
         try:
             redis_key = f"service:{service.name}:{service.id}"
             await self.redis_manager.set(redis_key, json.dumps(service.model_dump()), ex=settings.REDIS_TTL)
@@ -42,7 +79,7 @@ class ServiceDiscovery:
         except Exception as e:
             logger.error(f"Failed to register service in Redis: {e}")
         
-        # 2. 注册到 Consul（如果启用）
+        # 2. 注册到 Consul
         if settings.CONSUL_ENABLED:
             try:
                 tags = service.metadata.get("tags", []) if service.metadata else []
@@ -68,12 +105,15 @@ class ServiceDiscovery:
             except Exception as e:
                 logger.error(f"Failed to register service in Consul: {e}")
         
-        # 返回结果：至少有一个成功
+        # 3. 同步到本地缓存（始终更新，作为兜底）
+        self._local_cache[self._cache_key(service.name, service.id)] = service
+        self._save_local_cache()
+        
         return redis_ok or consul_ok
 
     async def get_healthy_services(self, service_name: str) -> list[ServiceBase]:
         """
-        获取健康的服务实例列表
+        获取健康的服务实例列表（降级策略：Redis → Consul → 本地缓存）
         
         Args:
             service_name: 服务名称
@@ -83,35 +123,43 @@ class ServiceDiscovery:
         """
         pattern = f"service:{service_name}:*"
         
+        # 1. 尝试从 Redis 获取
         try:
             keys = await self.redis_manager.keys(pattern)
-            if not keys:
-                if not settings.CONSUL_ENABLED:
-                    return []
-                return await self._get_services_from_consul(service_name)
-            
-            services = []
-            for key in keys:
-                try:
-                    value = await self.redis_manager.get(key)
-                    if value:
-                        data = json.loads(value)
-                        # 只返回健康的服务
-                        if data.get('status') != 'unhealthy':
-                            services.append(ServiceBase(**data))
-                except Exception as e:
-                    logger.warning(f"Failed to parse service data: {e}")
-            
-            return services
+            if keys:
+                services = []
+                for key in keys:
+                    try:
+                        value = await self.redis_manager.get(key)
+                        if value:
+                            data = json.loads(value)
+                            if data.get('status') != 'unhealthy':
+                                services.append(ServiceBase(**data))
+                    except Exception as e:
+                        logger.warning(f"Failed to parse service data: {e}")
+                return services
         except Exception as e:
-            logger.error(f"Failed to get healthy services from Redis: {e}")
-            if settings.CONSUL_ENABLED:
-                return await self._get_services_from_consul(service_name)
-            return []
+            logger.error(f"Failed to get services from Redis: {e}")
+        
+        # 2. Redis 失败，尝试 Consul
+        if settings.CONSUL_ENABLED:
+            try:
+                services = await self._get_services_from_consul(service_name)
+                if services:
+                    return services
+            except Exception as e:
+                logger.error(f"Failed to get services from Consul: {e}")
+        
+        # 3. 两者都失败，返回本地缓存
+        logger.warning(f"Using local cache as fallback for service: {service_name}")
+        return [
+            svc for key, svc in self._local_cache.items()
+            if key.startswith(f"{service_name}:") and svc.status != "unhealthy"
+        ]
 
     async def get_service(self, service_name: str, service_id: Optional[str] = None) -> Optional[ServiceBase]:
         """
-        获取指定服务实例
+        获取指定服务实例（降级策略：Redis → Consul → 本地缓存）
         
         Args:
             service_name: 服务名称
@@ -120,6 +168,7 @@ class ServiceDiscovery:
         Returns:
             服务实例或 None
         """
+        # 1. 优先从 Redis 获取
         if service_id:
             redis_key = f"service:{service_name}:{service_id}"
             try:
@@ -127,11 +176,32 @@ class ServiceDiscovery:
                 if value:
                     return ServiceBase(**json.loads(value))
             except Exception as e:
-                logger.error(f"Failed to get service: {e}")
+                logger.error(f"Failed to get service from Redis: {e}")
         else:
             services = await self.get_healthy_services(service_name)
             return services[0] if services else None
-        return None
+        
+        # 2. Redis 没有或失败，从 Consul 获取
+        if settings.CONSUL_ENABLED:
+            try:
+                services = await self._get_services_from_consul(service_name)
+                if service_id:
+                    for svc in services:
+                        if svc.id == service_id:
+                            return svc
+                else:
+                    return services[0] if services else None
+            except Exception as e:
+                logger.error(f"Failed to get service from Consul: {e}")
+        
+        # 3. 两者都失败，从本地缓存获取
+        logger.warning(f"Using local cache as fallback for service: {service_name}:{service_id}")
+        cache_key = self._cache_key(service_name, service_id) if service_id else None
+        if cache_key:
+            return self._local_cache.get(cache_key)
+        else:
+            services = [svc for key, svc in self._local_cache.items() if key.startswith(f"{service_name}:")]
+            return services[0] if services else None
 
     async def _get_services_from_consul(self, service_name: str) -> list[ServiceBase]:
         """从 Consul 获取服务列表"""

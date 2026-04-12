@@ -10,16 +10,19 @@ API 路由
 - 熔断器状态
 """
 
+import time
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, field_validator, field_serializer
 from typing import Optional, List
 from loguru import logger
 
+from config.settings import settings
 from app.services.discovery import get_service_discovery
 from app.services.config_manager import get_config_manager
 from app.services.circuit_breaker import CircuitBreakerRegistry, CircuitBreakerStats
 from app.models.service import ServiceBase
 from app.api.validators import validator, ValidationError
+from app.utils.redis_manager import get_redis_manager
 
 router = APIRouter()
 
@@ -175,9 +178,92 @@ async def get_service(service_name: str, service_id: str):
 @router.get("/health")
 async def health_check():
     """
-    健康检查接口
+    健康检查接口（供负载均衡器使用）
     """
-    return {"status": "healthy", "service": "gateway"}
+    from app.utils.redis_manager import get_redis_manager
+    from app.utils.consul_manager import get_consul_manager
+    
+    redis = get_redis_manager()
+    consul = get_consul_manager()
+    
+    checks = {
+        "gateway": "healthy",
+        "redis": "unknown",
+        "consul": "disabled" if not settings.CONSUL_ENABLED else "unknown"
+    }
+    
+    # 检查 Redis
+    try:
+        await redis.ping() if hasattr(redis, 'ping') else await redis.get("health:check")
+        checks["redis"] = "healthy"
+    except Exception as e:
+        checks["redis"] = f"unhealthy: {str(e)}"
+    
+    # 检查 Consul
+    if settings.CONSUL_ENABLED:
+        try:
+            if consul.is_healthy():
+                checks["consul"] = "healthy"
+            else:
+                checks["consul"] = "unhealthy"
+        except Exception as e:
+            checks["consul"] = f"unhealthy: {str(e)}"
+    
+    # 整体状态
+    overall_status = "healthy" if all(v == "healthy" for v in checks.values()) else "degraded"
+    
+    return {
+        "status": overall_status,
+        "service": "gateway",
+        "checks": checks,
+        "timestamp": int(time.time())
+    }
+
+
+@router.post("/health/check-services")
+async def trigger_health_check():
+    """
+    手动触发所有服务的健康检查
+    
+    用于调试或强制刷新服务状态
+    """
+    from app.services.health_checker import HealthChecker
+    from app.services.discovery import get_service_discovery
+    import asyncio
+    
+    discovery = get_service_discovery()
+    
+    # 获取所有服务名称
+    redis = get_redis_manager()
+    service_keys = await redis.keys("service:*:*")
+    service_names = set()
+    for key in service_keys:
+        parts = key.split(":")
+        if len(parts) >= 2:
+            service_names.add(parts[1])
+    
+    results = {}
+    for service_name in service_names:
+        services = await discovery.get_healthy_services(service_name)
+        results[service_name] = {
+            "total_instances": len(services),
+            "healthy_instances": len([s for s in services if s.status == "healthy"]),
+            "instances": [
+                {
+                    "id": s.id,
+                    "host": s.host,
+                    "port": s.port,
+                    "status": s.status
+                }
+                for s in services
+            ]
+        }
+    
+    return {
+        "message": "Health check completed",
+        "services": results,
+        "timestamp": int(time.time())
+    }
 
 
 @router.get("/")
@@ -361,3 +447,11 @@ async def reset_circuit_breaker(name: str):
         breaker._stats = CircuitBreakerStats()
         return {"message": f"熔断器 {name} 已重置"}
     raise HTTPException(status_code=404, detail="熔断器不存在")
+
+
+
+
+
+
+
+
