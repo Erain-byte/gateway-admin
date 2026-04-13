@@ -2,11 +2,18 @@
 服务来源认证中间件
 
 只允许以下来源访问 Admin 服务：
-1. Gateway（通过 X-Forwarded-By Header 标识）
-2. 已在 Redis/Consul 中注册的内部服务
+1. Gateway（通过 X-Forwarded-By Header + HMAC 签名标识）
+2. 已在 Redis/Consul 中注册的内部服务（通过 X-Service-Name + HMAC 签名）
+
+安全机制：
+- 所有内部请求必须携带 HMAC 签名
+- 签名密钥从 Redis 动态获取（config:hmac:{service_name}）
+- 防止 Header 伪造和重放攻击
 """
 from typing import Optional, Set, List
 import time
+import hmac
+import hashlib
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
@@ -50,13 +57,56 @@ class ServiceSourceAuthMiddleware(BaseHTTPMiddleware):
         service_name_header = request.headers.get("X-Service-Name")
         forwarded_by = request.headers.get("X-Forwarded-By")
         
-        # 判断请求来源
-        is_from_gateway = forwarded_by == "gateway"
-        is_from_registered_service = await self._is_from_registered_service(
-            service_name_header, client_host
-        )
+        # 判断请求来源并验证 HMAC 签名
+        is_from_gateway = False
+        is_from_registered_service = False
         
-        # 安全策略：只允许 Gateway 或已注册服务
+        if forwarded_by == "gateway":
+            # Gateway 请求：使用当前服务的密钥验证（因为 Gateway 使用的是目标服务的密钥签名）
+            # 例如：Gateway → Admin Service，Gateway 使用 admin-service 的密钥签名
+            #       Admin Service 验证时也使用自己的密钥
+            current_service_name = settings.SERVICE_NAME
+            if self._verify_hmac_signature(request, current_service_name):
+                is_from_gateway = True
+                logger.debug(f"✅ Gateway access verified with valid signature")
+            else:
+                logger.warning(f"🚫 Gateway access denied: invalid signature from {client_host}")
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "code": 403,
+                        "message": "Forbidden: Invalid Gateway signature",
+                        "data": None
+                    }
+                )
+        elif service_name_header:
+            # 内部服务请求：验证服务注册状态 + HMAC 签名
+            if await self._is_from_registered_service(service_name_header, client_host):
+                if self._verify_hmac_signature(request, service_name_header):
+                    is_from_registered_service = True
+                    logger.debug(f"✅ Service '{service_name_header}' access verified with valid signature")
+                else:
+                    logger.warning(f"🚫 Service '{service_name_header}' access denied: invalid signature from {client_host}")
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "code": 403,
+                            "message": f"Forbidden: Invalid signature from service '{service_name_header}'",
+                            "data": None
+                        }
+                    )
+            else:
+                logger.warning(f"🚫 Unregistered service access attempt: {service_name_header} from {client_host}")
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "code": 403,
+                        "message": f"Forbidden: Service '{service_name_header}' is not registered",
+                        "data": None
+                    }
+                )
+        
+        # 最终安全检查
         if not (is_from_gateway or is_from_registered_service):
             logger.warning(
                 f"🚫 Unauthorized access attempt from {client_host} "
@@ -90,6 +140,95 @@ class ServiceSourceAuthMiddleware(BaseHTTPMiddleware):
         从配置文件读取公开路径列表，支持通配符
         """
         return is_public_path(path, self.public_patterns)
+    
+    def _verify_hmac_signature(self, request: Request, service_name: str) -> bool:
+        """
+        验证 HMAC 签名
+        
+        Args:
+            request: 请求对象
+            service_name: 服务名称（gateway 或其他服务名）
+        
+        Returns:
+            签名是否有效
+        """
+        # 获取签名相关 Header
+        signature = request.headers.get("X-Signature")
+        timestamp = request.headers.get("X-Timestamp")
+        
+        if not signature or not timestamp:
+            logger.warning(f"Missing signature or timestamp from {service_name}")
+            return False
+        
+        # 验证时间戳（防止重放攻击，5分钟有效期）
+        try:
+            req_time = float(timestamp)
+            if abs(time.time() - req_time) > 300:  # 5分钟
+                logger.warning(f"Signature expired from {service_name}")
+                return False
+        except ValueError:
+            logger.warning(f"Invalid timestamp format from {service_name}")
+            return False
+        
+        # 从 Redis 获取 HMAC Key
+        hmac_key = self._get_hmac_key(service_name)
+        if not hmac_key:
+            logger.error(f"HMAC key not found for service: {service_name}")
+            return False
+        
+        # 构建签名字符串
+        method = request.method
+        path = request.url.path
+        message = f"{method}:{path}:{timestamp}"
+        
+        # 计算期望的签名
+        expected_signature = hmac.new(
+            hmac_key.encode(),
+            message.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        
+        # 比较签名（防止时序攻击）
+        is_valid = hmac.compare_digest(signature, expected_signature)
+        
+        if not is_valid:
+            logger.warning(f"Invalid signature from {service_name}")
+        
+        return is_valid
+    
+    def _get_hmac_key(self, service_name: str) -> Optional[str]:
+        """
+        从 Redis 获取服务的 HMAC Key
+        
+        Args:
+            service_name: 服务名称
+        
+        Returns:
+            HMAC Key 或 None
+        """
+        if not self.redis:
+            logger.error("Redis manager not available")
+            return None
+        
+        try:
+            import asyncio
+            
+            # 异步获取
+            async def get_key():
+                key = await self.redis.get(f"config:hmac:{service_name}")
+                return key
+            
+            # 在同步上下文中运行异步代码
+            loop = asyncio.new_event_loop()
+            try:
+                hmac_key = loop.run_until_complete(get_key())
+                return hmac_key
+            finally:
+                loop.close()
+        
+        except Exception as e:
+            logger.error(f"Failed to get HMAC key from Redis: {e}")
+            return None
     
     async def _is_from_registered_service(
         self, 

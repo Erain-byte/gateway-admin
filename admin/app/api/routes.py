@@ -39,7 +39,9 @@ async def verify_token(token: str = Depends(get_token)) -> dict:
     data["_token"] = token
     return data
 
-
+"""
+    登录、登出、获取用户信息、设置和获取 CORS 配置、设置和删除 HMAC Key
+"""
 class LoginRequest(BaseModel):
     username: str
     password: str

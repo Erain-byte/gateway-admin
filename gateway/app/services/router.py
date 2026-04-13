@@ -6,9 +6,13 @@
 - 负载均衡选择后端
 - 请求转发
 - 熔断保护
+- HMAC 签名验证（内部服务通信安全）
 """
 
 from typing import Optional,Any
+import time
+import hmac
+import hashlib
 from starlette.requests import Request
 from starlette.responses import Response, JSONResponse
 from loguru import logger
@@ -17,6 +21,7 @@ from app.services.discovery import get_service_discovery
 from app.services.load_balancer import get_load_balancer
 from app.services.circuit_breaker import get_circuit_breaker, CircuitOpenError
 from app.utils.httpx_manager import get_http_client
+from app.utils.redis_manager import get_redis_manager
 
 
 class Router:
@@ -26,6 +31,7 @@ class Router:
         self.discovery = get_service_discovery()
         self.load_balancer = get_load_balancer()
         self.http_client = get_http_client()
+        self.redis = get_redis_manager()
         self.circuit_breakers: dict[str, Any] = {}  # 按服务名的熔断器
 
     def _get_circuit_breaker(self, service_name: str):
@@ -38,6 +44,88 @@ class Router:
                 timeout=30
             )
         return self.circuit_breakers[service_name]
+    
+    async def _generate_hmac_signature(self, method: str, path: str, target_service: str) -> tuple[str, str]:
+        """
+        生成 HMAC 签名
+        
+        Args:
+            method: HTTP 方法
+            path: 请求路径
+            target_service: 目标服务名称
+        
+        Returns:
+            (signature, timestamp) 元组
+        """
+        # 从 Redis 获取 HMAC Key
+        hmac_key = await self._get_hmac_key(target_service)
+        if not hmac_key:
+            logger.error(f"HMAC key not found for service: {target_service}")
+            # 如果没有密钥，使用默认密钥（仅开发环境）
+            hmac_key = "default-dev-key-change-in-production"
+        
+        # 生成时间戳
+        timestamp = str(time.time())
+        
+        # 构建签名字符串
+        message = f"{method}:{path}:{timestamp}"
+        
+        # 计算签名
+        signature = hmac.new(
+            hmac_key.encode(),
+            message.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        
+        return signature, timestamp
+    
+    async def _get_hmac_key(self, service_name: str) -> Optional[str]:
+        """
+        从 Redis 获取服务的 HMAC Key（支持 Consul 降级）
+        
+        Args:
+            service_name: 服务名称
+        
+        Returns:
+            HMAC Key 或 None
+        """
+        redis_key = f"config:hmac:{service_name}"
+        consul_key = f"config/hmac/{service_name}"
+        
+        # 1. 尝试从 Redis 获取
+        if self.redis:
+            try:
+                key = await self.redis.get(redis_key)
+                if key:
+                    logger.debug(f"HMAC key retrieved from Redis: {service_name}")
+                    return key
+            except Exception as e:
+                logger.warning(f"Failed to get HMAC key from Redis: {e}")
+        
+        # 2. 降级：从 Consul 获取
+        try:
+            from app.utils.consul_manager import get_consul_manager
+            consul = get_consul_manager()
+            if consul.is_available():
+                key = consul.get_kv(consul_key)
+                if key:
+                    logger.info(f"HMAC key retrieved from Consul (fallback): {service_name}")
+                    
+                    # 可选：将 Consul 的数据回写到 Redis
+                    if self.redis:
+                        try:
+                            await self.redis.set(redis_key, key)
+                            logger.debug(f"Synced HMAC key from Consul to Redis: {service_name}")
+                        except Exception as sync_error:
+                            logger.warning(f"Failed to sync HMAC key to Redis: {sync_error}")
+                    
+                    return key
+        except Exception as e:
+            logger.warning(f"Failed to get HMAC key from Consul: {e}")
+        
+        # 3. 都失败，返回 None
+        logger.warning(f"HMAC key not found in Redis or Consul: {service_name}")
+        return None
     
     async def route(self, request: Request) -> Response:
         """
@@ -163,6 +251,16 @@ class Router:
         headers["X-Forwarded-Proto"] = request.url.scheme
         headers.pop("host", None)
         headers.pop("content-length", None)
+        
+        # 添加内部服务通信标识和 HMAC 签名
+        headers["X-Forwarded-By"] = "gateway"
+        signature, timestamp = await self._generate_hmac_signature(
+            method=request.method,
+            path=request.url.path,
+            target_service=service_name
+        )
+        headers["X-Signature"] = signature
+        headers["X-Timestamp"] = timestamp
 
         try:
             body = await request.body()
