@@ -62,7 +62,9 @@ def _init_cluster():
         host, port = primary_node.split(':', 1)
         url = f"redis://:{settings.REDIS_PASSWORD}@{host}:{port}/0" if settings.REDIS_PASSWORD else f"redis://{host}:{port}/0"
     else:
-        url = f"redis://:{settings.REDIS_PASSWORD}@{primary_node}:6379/0" if settings.REDIS_PASSWORD else f"redis://{primary_node}:6379/0"
+        # 使用配置的端口，默认为 6379
+        port = settings.REDIS_PORT
+        url = f"redis://:{settings.REDIS_PASSWORD}@{primary_node}:{port}/0" if settings.REDIS_PASSWORD else f"redis://{primary_node}:{port}/0"
 
     _cluster = RedisCluster.from_url(
         url,

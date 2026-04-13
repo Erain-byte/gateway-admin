@@ -70,6 +70,39 @@ class ServiceDiscovery:
         redis_ok = False
         consul_ok = False
         
+        # 0. 清理同一服务的其他实例（避免重复注册）
+        try:
+            # 清理 Redis 中的旧实例
+            pattern = f"service:{service.name}:*"
+            existing_keys = await self.redis_manager.keys(pattern)
+            for key in existing_keys:
+                # 跳过当前 ID
+                if key.endswith(f":{service.id}"):
+                    continue
+                # 删除旧实例
+                await self.redis_manager.delete(key)
+                logger.info(f"Removed old instance from Redis: {key}")
+                
+                # 从本地缓存中删除
+                cache_key = key.replace("service:", "").replace(":", ":", 1)
+                if cache_key in self._local_cache:
+                    del self._local_cache[cache_key]
+                    logger.info(f"Removed from local cache: {cache_key}")
+            
+            # 清理 Consul 中的旧实例
+            if settings.CONSUL_ENABLED:
+                try:
+                    consul_services = self.consul_manager.get_services()
+                    for svc_id, svc_info in consul_services.items():
+                        # 检查是否是同一服务的不同实例
+                        if svc_info.get('Service') == service.name and svc_id != service.id:
+                            self.consul_manager.deregister_service(svc_id)
+                            logger.info(f"Removed old instance from Consul: {svc_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup Consul instances: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to cleanup old instances: {e}")
+        
         # 1. 注册到 Redis
         try:
             redis_key = f"service:{service.name}:{service.id}"

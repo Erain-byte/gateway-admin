@@ -10,8 +10,8 @@ from pydantic import field_validator
 from typing import Optional
 
 
-# 项目根目录
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Gateway 项目根目录（当前文件所在目录的上级）
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class Settings(BaseSettings):

@@ -103,6 +103,24 @@ async def register_service(req: ServiceRegisterRequest):
     success = await discovery.register_service(service)
 
     if success:
+        # 动态启动健康检查（如果尚未启动）
+        try:
+            from app.services.health_checker import HealthChecker
+            import asyncio
+            
+            # 检查是否已经有该服务的健康检查器
+            # 这里简化处理，每次注册都尝试启动（HealthChecker 内部会避免重复）
+            checker = HealthChecker(
+                name=service.name,
+                host=service.host,
+                port=service.port,
+                interval=10
+            )
+            task = asyncio.create_task(checker.start_health_check())
+            logger.info(f"已启动服务 [{service.name}] 的健康检查 (ID: {service.id})")
+        except Exception as e:
+            logger.warning(f"启动健康检查失败: {e}")
+        
         return {"message": "Service registered", "service_id": service.id}
     raise HTTPException(status_code=500, detail="Failed to register service")
 
