@@ -30,8 +30,9 @@
 
 ### HTTP 客户端
 - **httpx** (>=0.28.0) - 异步 HTTP 客户端
-  - Gateway 服务注册
-  - 健康检查端点
+  - Gateway 服务注册（POST /api/services/register）
+  - Gateway 服务注销（DELETE /api/services/unregister）
+  - 健康检查端点探测
 
 ### 密码加密
 - **passlib[bcrypt]** (>=1.7.4) - 密码哈希库
@@ -120,13 +121,18 @@ verified = pwd_context.verify("password", hashed)  # 验证
 
 ### 4. HTTP 客户端
 ```python
-# httpx
-import httpx
+# httpx - 用于与 Gateway 通信
+from app.utils.http_client import http_client
 
-client = httpx.AsyncClient()
-response = await client.post(
+# 服务注册
+response = await http_client.post(
     "http://gateway:9000/api/services/register",
     json=service_data
+)
+
+# 服务注销
+response = await http_client.delete(
+    f"http://gateway:9000/api/services/unregister/{service_id}"
 )
 ```
 
@@ -255,6 +261,7 @@ pip install pytest pytest-asyncio
 | aiomysql | ✅ | ❌ | Admin 需要 MySQL |
 | passlib | ✅ | ❌ | Admin 需要密码加密 |
 | python-consul | ❌ | ✅ | Gateway 需要 Consul |
+| httpx | ✅ | ✅ | Admin: 注册服务 / Gateway: 代理请求 |
 
 ### 共同依赖
 
