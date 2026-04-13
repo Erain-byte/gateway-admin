@@ -1,0 +1,43 @@
+# Lingma IDE 配置（保留 skills 目录）
+.lingma/
+!.lingma/skills/
+!.lingma/skills/**
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Data and Cache
+data/
+*.json
+!package-lock.json
