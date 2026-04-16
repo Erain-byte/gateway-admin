@@ -129,6 +129,20 @@ async def register_service(req: ServiceRegisterRequest):
         except Exception as e:
             logger.warning(f"启动健康检查失败: {e}")
         
+        # 只更新新注册服务的 HMAC 密钥到本地缓存
+        try:
+            from app.utils.redis_manager import get_redis_manager
+            redis = get_redis_manager()
+            config_mgr = get_config_manager()
+            
+            # 从 Redis 读取新服务的 HMAC 密钥
+            hmac_key = await redis.get(f"config:hmac:{service.name}")
+            if hmac_key:
+                config_mgr._cache_set(f"config:hmac:{service.name}", hmac_key)
+                logger.info(f"已更新服务 [{service.name}] 的 HMAC 密钥到本地缓存")
+        except Exception as e:
+            logger.warning(f"更新服务 HMAC 密钥缓存失败: {e}")
+        
         return {"message": "Service registered", "service_id": service.id}
     raise HTTPException(status_code=500, detail="Failed to register service")
 

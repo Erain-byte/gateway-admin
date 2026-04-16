@@ -41,9 +41,32 @@ class ConfigManager:
         try:
             os.makedirs(os.path.dirname(self._cache_file), exist_ok=True)
             if os.path.exists(self._cache_file):
+                # 检查文件大小，避免读取空文件
+                file_size = os.path.getsize(self._cache_file)
+                if file_size == 0:
+                    logger.warning(f"本地缓存文件为空: {self._cache_file}")
+                    self._local_cache = {}
+                    return
+                
                 with open(self._cache_file, "r", encoding="utf-8") as f:
-                    self._local_cache = json.load(f)
+                    content = f.read().strip()
+                    if not content:
+                        logger.warning(f"本地缓存文件内容为空: {self._cache_file}")
+                        self._local_cache = {}
+                        return
+                    
+                    self._local_cache = json.loads(content)
                     logger.info(f"已加载 {len(self._local_cache)} 个配置项到本地缓存")
+        except json.JSONDecodeError as e:
+            logger.warning(f"本地缓存文件格式错误，将重建: {e}")
+            self._local_cache = {}
+            # 删除损坏的文件
+            try:
+                if os.path.exists(self._cache_file):
+                    os.remove(self._cache_file)
+                    logger.info(f"已删除损坏的缓存文件: {self._cache_file}")
+            except Exception:
+                pass
         except Exception as e:
             logger.warning(f"加载本地配置缓存失败: {e}")
             self._local_cache = {}

@@ -33,11 +33,31 @@ class ServiceDiscovery:
             # 确保目录存在
             os.makedirs(os.path.dirname(self._cache_file), exist_ok=True)
             if os.path.exists(self._cache_file):
+                # 检查文件大小，避免读取空文件
+                file_size = os.path.getsize(self._cache_file)
+                if file_size == 0:
+                    logger.warning(f"Services cache file is empty: {self._cache_file}")
+                    return
+                
                 with open(self._cache_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                    content = f.read().strip()
+                    if not content:
+                        logger.warning(f"Services cache file content is empty: {self._cache_file}")
+                        return
+                    
+                    data = json.loads(content)
                     for key, value in data.items():
                         self._local_cache[key] = ServiceBase(**value)
                     logger.info(f"Loaded {len(self._local_cache)} services from local cache")
+        except json.JSONDecodeError as e:
+            logger.warning(f"Services cache file format error, will rebuild: {e}")
+            # 删除损坏的文件
+            try:
+                if os.path.exists(self._cache_file):
+                    os.remove(self._cache_file)
+                    logger.info(f"Removed corrupted cache file: {self._cache_file}")
+            except Exception:
+                pass
         except Exception as e:
             logger.warning(f"Failed to load local cache: {e}")
 
