@@ -91,84 +91,18 @@ class ConfigManager:
 
     # ==================== HMAC 密钥管理 ====================
 
-    async def create_hmac_key(self, app_id: str, secret_key: Optional[str] = None) -> str:
-        """
-        创建或更新 HMAC 密钥（同步到 Redis 和本地缓存）
-
-        Args:
-            app_id: 应用标识
-            secret_key: 密钥（不提供则自动生成）
-
-        Returns:
-            密钥
-        """
-        if secret_key is None:
-            secret_key = secrets.token_urlsafe(32)
-
-        key = f"{self.HMAC_KEY_PREFIX}{app_id}"
-        
-        # 1. 保存到 Redis
-        try:
-            await self.redis.set(key, secret_key)
-        except Exception as e:
-            logger.error(f"HMAC 密钥保存到 Redis 失败: {e}")
-        
-        # 2. 同步到本地缓存（始终执行，作为兜底）
-        self._cache_set(key, secret_key)
-
-        logger.info(f"HMAC密钥已创建/更新: {app_id}")
-        return secret_key
-
     async def get_hmac_key(self, app_id: str) -> Optional[str]:
         """
-        获取 HMAC 密钥（降级策略：Redis → 本地缓存）
+        获取 HMAC 密钥（统一使用 config:hmac:gateway）
 
         Args:
-            app_id: 应用标识
+            app_id: 应用标识（未使用，保留兼容性）
 
         Returns:
-            密钥，不存在返回 None
+            统一的 Gateway HMAC 密钥
         """
-        key = f"{self.HMAC_KEY_PREFIX}{app_id}"
-        
-        # 1. 优先从 Redis 获取
-        try:
-            value = await self.redis.get(key)
-            if value:
-                # 保存到本地缓存
-                self._cache_set(key, value)
-                return value
-        except Exception as e:
-            logger.error(f"从 Redis 获取 HMAC 密钥失败: {e}")
-        
-        # 2. 从本地缓存获取
-        logger.warning(f"HMAC 密钥降级到本地缓存: {app_id}")
-        return self._cache_get(key)
-
-    async def delete_hmac_key(self, app_id: str) -> bool:
-        """
-        删除 HMAC 密钥
-
-        Args:
-            app_id: 应用标识
-
-        Returns:
-            是否删除成功
-        """
-        key = f"{self.HMAC_KEY_PREFIX}{app_id}"
-        return await self.redis.delete(key)
-
-    async def list_hmac_keys(self) -> List[str]:
-        """
-        获取所有 HMAC 密钥的 app_id 列表
-
-        Returns:
-            app_id 列表
-        """
-        pattern = f"{self.HMAC_KEY_PREFIX}*"
-        keys = await self.redis.keys(pattern)
-        prefix_len = len(self.HMAC_KEY_PREFIX)
-        return [k[prefix_len:] for k in keys if k]
+        from config.settings import settings
+        return settings.HMAC_SECRET_KEY
 
     # ==================== CORS 配置管理 ====================
 
@@ -384,12 +318,25 @@ class ConfigManager:
             else:
                 logger.warning("CORS 配置初始化失败，使用本地兜底")
 
-        # 加载 HMAC 密钥
-        hmac_keys = await self.list_hmac_keys()
-        for app_id in hmac_keys:
-            # 调用 get_hmac_key 会自动保存到本地缓存
-            await self.get_hmac_key(app_id)
-        logger.info(f"HMAC 密钥已加载: {len(hmac_keys)} 个")
+        # 加载 HMAC 密钥（统一密钥，同步到本地缓存）
+        from config.settings import settings
+        hmac_key = settings.HMAC_SECRET_KEY
+        if hmac_key:
+            self._cache_set(f"{self.HMAC_KEY_PREFIX}gateway", hmac_key)
+            logger.info(f"HMAC 密钥已加载并缓存: 使用统一密钥")
+        else:
+            logger.warning("HMAC_SECRET_KEY 未配置")
+
+        # 加载系统级白名单（从配置读取并写入 Redis 和本地缓存）
+        system_whitelist_str = getattr(settings, 'SYSTEM_WHITELIST', '')
+        if system_whitelist_str:
+            system_whitelist = [path.strip() for path in system_whitelist_str.split(",") if path.strip()]
+            whitelist_json = json.dumps(system_whitelist)
+            await self.redis.set("config:gateway:system_whitelist", whitelist_json)
+            self._cache_set("config:gateway:system_whitelist", whitelist_json)
+            logger.info(f"System whitelist initialized: {system_whitelist}")
+        else:
+            logger.warning("SYSTEM_WHITELIST 未配置")
 
         logger.info("配置加载完成")
 

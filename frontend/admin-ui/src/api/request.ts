@@ -1,10 +1,8 @@
 import axios from 'axios'
 import type { AxiosInstance, InternalAxiosRequestConfig } from 'axios'
 import { ElMessage } from 'element-plus'
-import CryptoJS from 'crypto-js'
 
 const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:9000'
-const hmacKey = import.meta.env.VITE_GATEWAY_HMAC_KEY || ''
 
 const instance: AxiosInstance = axios.create({
   baseURL,
@@ -14,25 +12,6 @@ const instance: AxiosInstance = axios.create({
   }
 })
 
-// 生成 HMAC 签名
-function generateHmacSignature(data: any): {
-  signature: string
-  timestamp: string
-  nonce: string
-} {
-  const timestamp = String(Math.floor(Date.now() / 1000))
-  const nonce = Math.random().toString(36).substring(2, 15)
-  
-  // 构建签名字符串：timestamp + nonce + body
-  const bodyStr = data ? JSON.stringify(data) : ''
-  const message = `${timestamp}${nonce}${bodyStr}`
-  
-  // 生成 HMAC-SHA256 签名
-  const signature = CryptoJS.HmacSHA256(message, hmacKey).toString(CryptoJS.enc.Hex)
-  
-  return { signature, timestamp, nonce }
-}
-
 // 请求拦截器
 instance.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
@@ -40,14 +19,6 @@ instance.interceptors.request.use(
     const token = localStorage.getItem('token')
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`
-    }
-    
-    // 添加 HMAC 签名（仅当配置了密钥时）
-    if (hmacKey && config.headers) {
-      const { signature, timestamp, nonce } = generateHmacSignature(config.data)
-      config.headers['X-Signature'] = signature
-      config.headers['X-Timestamp'] = timestamp
-      config.headers['X-Nonce'] = nonce
     }
     
     return config

@@ -16,6 +16,7 @@ from loguru import logger
 import uvicorn
 
 from config import settings
+from app.middleware.token_auth import TokenAuthMiddleware
 from app.middleware.hmac_middleware import HMACMiddleware
 from app.middleware.rate_limiter import RateLimiter
 from app.middleware.dynamic_cors import DynamicCORSMiddleware
@@ -155,7 +156,10 @@ app = FastAPI(
 # CORS 中间件（动态从 Redis 读取配置）
 app.add_middleware(DynamicCORSMiddleware)
 
-# HMAC 验证中间件
+# Token 验证中间件（客户端认证）
+app.add_middleware(TokenAuthMiddleware)
+
+# HMAC 验证中间件（服务间通信）
 app.add_middleware(HMACMiddleware)
 
 # 限流中间件（从 settings 读取配置）

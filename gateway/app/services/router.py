@@ -47,25 +47,19 @@ class Router:
     
     async def _generate_hmac_signature(self, method: str, path: str, target_service: str) -> tuple[str, str]:
         """
-        生成 HMAC 签名
+        生成 HMAC 签名（使用统一密钥）
         
         Args:
             method: HTTP 方法
             path: 请求路径
-            target_service: 目标服务名称
+            target_service: 目标服务名称（未使用，保留兼容性）
         
         Returns:
             (signature, timestamp) 元组
         """
-        # 从 Redis 获取 HMAC Key
-        hmac_key = await self._get_hmac_key(target_service)
-        if not hmac_key:
-            logger.error(f"HMAC key not found for service: {target_service}")
-            # 如果没有密钥，使用默认密钥（仅开发环境）
-            hmac_key = "default-dev-key-change-in-production"
-        
-        with open('d:/python_project/gateway/router_debug.log', 'a', encoding='utf-8') as f:
-            f.write(f"   HMAC Key (first 8): {hmac_key[:8]}...\n")
+        # 使用统一的 Gateway HMAC 密钥
+        from config.settings import settings
+        hmac_key = settings.HMAC_SECRET_KEY
         
         # 生成时间戳（使用整数，与 Admin 期望的格式一致）
         timestamp = str(int(time.time()))
@@ -247,6 +241,14 @@ class Router:
         
         # 添加内部服务通信标识和 HMAC 签名
         headers["X-Forwarded-By"] = "gateway"
+        
+        # 透传用户信息（从 Token 中间件验证后获取）
+        if hasattr(request.state, 'user_id') and request.state.user_id:
+            headers["X-User-ID"] = str(request.state.user_id)
+        if hasattr(request.state, 'user_role') and request.state.user_role:
+            headers["X-User-Role"] = request.state.user_role
+        if hasattr(request.state, 'user_permissions') and request.state.user_permissions:
+            headers["X-User-Permissions"] = ",".join(request.state.user_permissions)
         
         # 计算转发后的路径（用于生成签名）
         forwarded_path = target_url.replace(base_url, "")

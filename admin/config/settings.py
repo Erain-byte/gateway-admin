@@ -28,13 +28,14 @@ class Settings(BaseSettings):
     SERVICE_TAGS: str = "admin,management"
     SERVICE_DESCRIPTION: str = "后台管理服务"
     
-    # HMAC 白名单配置
-    HMAC_WHITELIST: str = "/api/auth/*,/api/captcha/*,/api/dashboard/*"
+    # HMAC 白名单配置（这些路径不需要 HMAC 签名验证）
+    HMAC_WHITELIST: str = "/api/auth/*,/api/captcha/*,/api/dashboard/*,/api/services/*"
     
     # Gateway 配置
     GATEWAY_URL: str = "http://localhost:9000"
     GATEWAY_APP_ID: str = "gateway"  # Gateway 的应用 ID
     SERVICE_TTL: int = 300
+    HMAC_SECRET_KEY: str = ""  # HMAC 密钥（从 Redis 获取，留空表示使用默认）
 
     # 数据库配置
     DATABASE_URL: str = "mysql+pymysql://admin:123123@localhost:3306/admin"

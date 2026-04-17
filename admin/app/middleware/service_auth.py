@@ -7,8 +7,9 @@
 
 安全机制：
 - 所有内部请求必须携带 HMAC 签名
-- 签名密钥从 Redis 动态获取（config:hmac:{service_name}）
+- 签名密钥从配置读取（统一使用 config:hmac:gateway）
 - 防止 Header 伪造和重放攻击
+- 用户信息从 Header 读取（X-User-ID, X-User-Role）
 """
 from typing import Optional, Set, List
 import time
@@ -61,13 +62,21 @@ class ServiceSourceAuthMiddleware(BaseHTTPMiddleware):
         is_from_registered_service = False
         
         if forwarded_by == "gateway":
-            # Gateway 请求：使用当前服务的密钥验证（因为 Gateway 使用的是目标服务的密钥签名）
-            # 例如：Gateway → Admin Service，Gateway 使用 admin-service 的密钥签名
-            #       Admin Service 验证时也使用自己的密钥
-            current_service_name = settings.SERVICE_NAME
-            if await self._verify_hmac_signature(request, current_service_name):
+            # Gateway 请求：使用统一密钥验证
+            if await self._verify_hmac_signature(request):
                 is_from_gateway = True
                 logger.debug(f"Gateway access verified with valid signature")
+                
+                # 提取用户信息并添加到 request.state
+                user_id = request.headers.get("X-User-ID")
+                user_role = request.headers.get("X-User-Role")
+                user_permissions = request.headers.get("X-User-Permissions", "")
+                
+                if user_id:
+                    request.state.user_id = int(user_id)
+                    request.state.user_role = user_role
+                    request.state.user_permissions = [p.strip() for p in user_permissions.split(",") if p.strip()] if user_permissions else []
+                    logger.debug(f"User info extracted: user_id={user_id}, role={user_role}")
             else:
                 logger.warning(f" Gateway access denied: invalid signature from {client_host}")
                 return JSONResponse(
@@ -140,13 +149,12 @@ class ServiceSourceAuthMiddleware(BaseHTTPMiddleware):
         """
         return is_public_path(path, self.public_patterns)
     
-    async def _verify_hmac_signature(self, request: Request, service_name: str) -> bool:
+    async def _verify_hmac_signature(self, request: Request) -> bool:
         """
-        验证 HMAC 签名
+        验证 HMAC 签名（使用统一密钥）
         
         Args:
             request: 请求对象
-            service_name: 服务名称（gateway 或其他服务名）
         
         Returns:
             签名是否有效
@@ -156,25 +164,28 @@ class ServiceSourceAuthMiddleware(BaseHTTPMiddleware):
         timestamp = request.headers.get("X-Timestamp")
         
         if not signature or not timestamp:
-            logger.warning(f"Missing signature or timestamp from {service_name}")
+            logger.warning(f"Missing signature or timestamp")
             return False
         
         # 验证时间戳（防止重放攻击，5分钟有效期）
         try:
             req_time = float(timestamp)
             if abs(time.time() - req_time) > 300:  # 5分钟
-                logger.warning(f"Signature expired from {service_name}")
+                logger.warning(f"Signature expired")
                 return False
         except ValueError:
-            logger.warning(f"Invalid timestamp format from {service_name}")
+            logger.warning(f"Invalid timestamp format")
             return False
         
-        # 从 Redis 获取 HMAC Key（使用当前服务的密钥，而不是发送方的密钥）
-        from config import settings
-        hmac_key = await self._get_hmac_key(settings.SERVICE_NAME)
+        # 使用统一的 Gateway HMAC 密钥（从 Redis 获取）
+        from app.utils.redis_manager import get_redis_manager
+        redis_manager = get_redis_manager()
+        hmac_key = await redis_manager.get("config:hmac:gateway")
+        
         if not hmac_key:
-            logger.error(f"HMAC key not found for service: {service_name}")
-            return False
+            logger.warning("HMAC key not found in Redis, using fallback")
+            # 降级：使用空字符串（不应该发生）
+            hmac_key = ""
         
         # 构建签名字符串
         method = request.method

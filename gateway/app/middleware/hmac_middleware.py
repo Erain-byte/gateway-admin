@@ -54,17 +54,23 @@ class HMACMiddleware(BaseHTTPMiddleware):
         # 2. 检查服务注册的白名单
         if await self._check_service_whitelist(request.url.path):
             return await call_next(request)
+        
+        # 3. 检查是否是客户端请求（有 Authorization 头）
+        # 客户端请求由 Token 中间件处理，不需要 HMAC 验证
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            return await call_next(request)
 
-        # 3. HMAC 未启用时跳过验证
+        # 4. HMAC 未启用时跳过验证
         if not settings.HMAC_ENABLED:
             return await call_next(request)
 
-        # 4. 获取签名参数
+        # 5. 获取签名参数
         signature = request.headers.get("X-Signature")
         timestamp_str = request.headers.get("X-Timestamp")
         nonce = request.headers.get("X-Nonce")
 
-        # 5. 检查必要参数
+        # 6. 检查必要参数
         if not all([signature, timestamp_str, nonce]):
             return self._error_response(
                 401,

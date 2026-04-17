@@ -123,28 +123,7 @@ class RegisterService:
             except Exception as e:
                 logger.error(f"创建 Gateway HMAC Key 失败: {e}")
     
-    async def _ensure_service_hmac_key(self):
-        """确保 admin-service 自己的 HMAC 密钥存在并写入 Redis"""
-        try:
-            # 检查是否已存在
-            existing_key = await config_service.get_hmac_key(settings.SERVICE_NAME)
-            if existing_key:
-                logger.info(f"admin-service HMAC key already exists in Redis")
-                return
-            
-            # 生成新的 HMAC 密钥
-            import secrets
-            new_key = secrets.token_urlsafe(32)
-            
-            # 写入 Redis
-            success = await config_service.set_hmac_key(settings.SERVICE_NAME, new_key)
-            if success:
-                logger.info(f"Generated and stored admin-service HMAC key in Redis")
-            else:
-                logger.error(f"Failed to store admin-service HMAC key in Redis")
-        except Exception as e:
-            logger.error(f"Error ensuring service HMAC key: {e}")
-    
+
     async def _get_cors_config_from_redis(self):
         """从 Redis 获取 CORS 配置并应用"""
         try:
@@ -181,10 +160,7 @@ class RegisterService:
                 self._registered = False
                 return False
             
-            # 步骤 0: 生成 admin-service 自己的 HMAC 密钥并写入 Redis
-            await self._ensure_service_hmac_key()
-            
-            # 步骤 1: 从 Redis 获取 Gateway 的 HMAC Key
+            # 步骤 0: 从 Redis 获取 Gateway 的 HMAC Key
             has_key = await self._get_hmac_key_from_redis()
             
             # 步骤 2: 如果没有则创建

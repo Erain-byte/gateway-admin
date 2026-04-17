@@ -107,6 +107,10 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True  # 是否启用限流
     RATE_LIMIT_MAX_REQUESTS: int = 100  # 每时间窗口最大请求数
     RATE_LIMIT_WINDOW_SECONDS: int = 60  # 时间窗口大小（秒）
+    
+    # Gateway 系统级白名单配置（不需要 Token 验证的路径）
+    SYSTEM_WHITELIST: str = "/api/services/,/healthz,/docs,/openapi.json,/redoc"
+    
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
