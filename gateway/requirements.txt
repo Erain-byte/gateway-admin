@@ -16,9 +16,6 @@ redis>=5.2.0
 # HTTP 客户端
 httpx>=0.28.0
 
-# Consul 服务发现
-python-consul>=1.1.0
-
 # 日志
 loguru>=0.7.0
 
