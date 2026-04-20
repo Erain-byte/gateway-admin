@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     HMAC_WHITELIST: str = "/api/auth/*,/api/captcha/*"
     
     # Gateway 配置
-    GATEWAY_URL: str = "http://localhost:9000"
+    GATEWAY_URL: str = "http://localhost:9000/"
     GATEWAY_APP_ID: str = "gateway"  # Gateway 的应用 ID
     SERVICE_TTL: int = 300
     HMAC_SECRET_KEY: str = ""  # HMAC 密钥（从 Redis 获取，留空表示使用默认）

@@ -9,6 +9,7 @@ from loguru import logger
 from app.utils.redis_pool import get_redis_pool
 from app.utils.datbase_pool import db_manager
 from app.utils.httpx_pool import httpx_pool 
+from app.services.register_service import register_service
 #redis_pool = RedisPool()
 
 @asynccontextmanager
@@ -39,11 +40,24 @@ async def lifespan(app: FastAPI):
         logger.info("Httpx initialized")
     except Exception as e:
         logger.warning(f"Httpx initialization failed: {e}")   
-    
+
+    #注册到Gateway
+    try:
+        await register_service.register()
+        logger.info("Registered to Gateway")
+    except Exception as e:
+        logger.error(f"Failed to register to Gateway: {e}")
     yield
     
     # 关闭时
     logger.info("User service shutting down...")
+    
+    # 注销服务（需要在关闭 HTTPX 之前）
+    try:
+        await register_service.unregister()
+        logger.info("Unregistered from Gateway")
+    except Exception as e:
+        logger.error(f"Failed to unregister from Gateway: {e}")
     
     # 关闭数据库
     try:
@@ -59,7 +73,7 @@ async def lifespan(app: FastAPI):
         logger.info("Redis connection closed")
     except Exception as e:
         logger.error(f"Failed to close Redis: {e}")
-    #关闭http
+    # 关闭 HTTPX
     try:
         await httpx_pool.close()
         logger.info("Httpx closed")
@@ -74,7 +88,10 @@ app = FastAPI(
 )
 
 
-
+@app.get("/healthz")
+async def health_check():
+    """健康检查端点"""
+    return {"status": "healthy"}
 
 
 if __name__ == "__main__":

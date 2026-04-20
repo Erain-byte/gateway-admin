@@ -38,7 +38,6 @@ class DatabaseManage:
         # 同步引擎
         sync_engine = create_engine(
             url,
-            poolclass=pool.QueuePool,
             pool_size=settings.DB_POOL_SIZE,
             max_overflow=settings.DB_MAX_OVERFLOW,
             pool_timeout=30,
@@ -55,7 +54,8 @@ class DatabaseManage:
             max_overflow=settings.DB_MAX_OVERFLOW,
             pool_timeout=30,
             pool_recycle=3600,
-            pool_pre_ping=True
+            pool_pre_ping=True,
+            echo=_is_debug()
         )
         
         # 会话工厂
