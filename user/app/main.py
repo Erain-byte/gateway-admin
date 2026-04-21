@@ -10,6 +10,8 @@ from app.utils.redis_pool import get_redis_pool
 from app.utils.datbase_pool import db_manager
 from app.utils.httpx_pool import httpx_pool 
 from app.services.register_service import register_service
+from app.utils.fallback_manager import fallback_manager
+import asyncio
 #redis_pool = RedisPool()
 
 @asynccontextmanager
@@ -33,6 +35,7 @@ async def lifespan(app: FastAPI):
         logger.info("Redis connected successfully")
     except Exception as e:
         logger.warning(f"Redis connection failed: {e}")
+        fallback_manager.set_fallback("redis", True)
 
     # 初始化 HTTPX
     try:
@@ -47,10 +50,25 @@ async def lifespan(app: FastAPI):
         logger.info("Registered to Gateway")
     except Exception as e:
         logger.error(f"Failed to register to Gateway: {e}")
+        fallback_manager.set_fallback("gateway", True)
+    
+    # 启动自动恢复任务（仅在有服务降级时）
+    recovery_task = None
+    if fallback_manager.is_fallback("redis") or fallback_manager.is_fallback("gateway"):
+        recovery_task = asyncio.create_task(fallback_manager.start_auto_recovery())  # 启动自动恢复任务
+    
     yield
     
     # 关闭时
     logger.info("User service shutting down...")
+    
+    # 取消恢复任务
+    if recovery_task:
+        recovery_task.cancel()
+        try:
+            await recovery_task
+        except asyncio.CancelledError:
+            pass
     
     # 注销服务（需要在关闭 HTTPX 之前）
     try:
@@ -79,6 +97,7 @@ async def lifespan(app: FastAPI):
         logger.info("Httpx closed")
     except Exception as e:
         logger.error(f"Failed to close Httpx: {e}")
+
 
 app = FastAPI(
     title=settings.APP_NAME,
