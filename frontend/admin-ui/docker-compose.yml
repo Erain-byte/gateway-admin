@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  admin-ui:
+    build: .
+    ports:
+      - "80:80"
+    depends_on:
+      - gateway
+    networks:
+      - frontend
+
+  gateway:
+    image: nginx:alpine
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+    networks:
+      - frontend
+      - backend
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge

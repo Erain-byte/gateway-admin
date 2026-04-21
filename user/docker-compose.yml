@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  user:
+    build: .
+    ports:
+      - "8002:8002"
+    environment:
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - MYSQL_HOST=${MYSQL_HOST:-mysql}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_USER=${MYSQL_USER:-root}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-root}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-gateway_admin}
+      - GATEWAY_URL=${GATEWAY_URL:-http://gateway:9000}
+    depends_on:
+      - redis
+      - mysql
+    networks:
+      - backend
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - backend
+
+  mysql:
+    image: mysql:8
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-gateway_admin}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - backend
+
+volumes:
+  redis_data:
+  mysql_data:
+
+networks:
+  backend:
+    driver: bridge

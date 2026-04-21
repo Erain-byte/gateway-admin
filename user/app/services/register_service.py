@@ -155,7 +155,7 @@ class RegisterService:
         headers["Content-Type"] = "application/json"
         try:
             response = await self.httpx.delete(
-            f"{self.gateway_url}/api/services/unregister", 
+            f"{self.gateway_url}/api/services/unregister",  # 注销服务的接口
             headers=headers,
             content=body,
             timeout=5.0

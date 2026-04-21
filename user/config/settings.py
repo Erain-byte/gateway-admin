@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     HMAC_SECRET_KEY: str = ""  # HMAC 密钥（从 Redis 获取，留空表示使用默认）
 
     # 数据库配置
-    DATABASE_URL: str = "mysql+pymysql://root:123123@localhost:3306/user_db"
+    DATABASE_URL: str = "mysql+pymysql://user:123123@localhost:3306/user"
     DB_POOL_SIZE: int = 10
     DB_MAX_OVERFLOW: int = 20
     
